@@ -268,26 +268,28 @@ def send_msg(customer_id):
 def home():
     return "Verticum is live. Go to /dashboard"
 
-# Seed demo data
-@app.before_first_request
+# Seed demo data - Fixed for Flask 3.0 / Render
 def seed():
-    db.create_all()
-    if not Client.query.first():
-        c1 = Client(business_name="Glow Hair", whatsapp_number="+2348000000001", login_email="glow@glow.com", login_password="1234", language="Pidgin")
-        c2 = Client(business_name="Mama Nkechi Foods", whatsapp_number="+2348000000002", login_email="nkechi@food.com", login_password="1234", language="English")
-        db.session.add_all([c1,c2])
-        db.session.commit()
-        cust1 = Customer(client_id=c1.id, phone="+2348011111111", name="Ada - Glow Customer")
-        cust2 = Customer(client_id=c2.id, phone="+2348022222222", name="Chidi - Food Customer")
-        db.session.add_all([cust1,cust2])
-        db.session.commit()
-        db.session.add_all([
-            Message(customer_id=cust1.id, client_id=c1.id, sender="customer", text="Hello, how much is frontal wig?"),
-            Message(customer_id=cust1.id, client_id=c1.id, sender="bot", text="Our frontal wig na ₦85,000. Which one you want?"),
-            Message(customer_id=cust2.id, client_id=c2.id, sender="customer", text="Hello, how much is Ofada?"),
-            Message(customer_id=cust2.id, client_id=c2.id, sender="bot", text="Our Ofada rice na ₦5,500 per plate with chicken."),
-        ])
-        db.session.commit()
+    with app.app_context():
+        db.create_all()
+        if not Client.query.first():
+            c1 = Client(business_name="Glow Hair", whatsapp_number="+2348000000001", login_email="glow@glow.com", login_password="1234", language="Pidgin")
+            c2 = Client(business_name="Mama Nkechi Foods", whatsapp_number="+2348000000002", login_email="nkechi@food.com", login_password="1234", language="English")
+            db.session.add_all([c1,c2])
+            db.session.commit()
+            cust1 = Customer(client_id=c1.id, phone="+2348011111111", name="Ada - Glow Customer")
+            cust2 = Customer(client_id=c2.id, phone="+2348022222222", name="Chidi - Food Customer")
+            db.session.add_all([cust1,cust2])
+            db.session.commit()
+            db.session.add_all([
+                Message(customer_id=cust1.id, client_id=c1.id, sender="customer", text="Hello, how much is frontal wig?"),
+                Message(customer_id=cust1.id, client_id=c1.id, sender="bot", text="Our frontal wig na ₦85,000. Which one you want?"),
+                Message(customer_id=cust2.id, client_id=c2.id, sender="customer", text="Hello, how much is Ofada?"),
+                Message(customer_id=cust2.id, client_id=c2.id, sender="bot", text="Our Ofada rice na ₦5,500 per plate with chicken."),
+            ])
+            db.session.commit()
+
+seed()
 
 if __name__ == "__main__":
     app.run(debug=True)
