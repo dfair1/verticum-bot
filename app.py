@@ -184,4 +184,121 @@ def webhook():
             media_id = msg_obj["image"]["id"]
             CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id})
             # If in onboarding picture step, save it
-            if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone,
+            if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone, {}).get("step") == 6:
+                ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(media_id)
+                count = len(ONBOARDING[customer_phone]["data"]["pictures"])
+                lang = USER_LANG.get(customer_phone, "en")
+                if lang == "pg":
+                    reply = f"Picture {count} saved! Send another one, or type DONE if you don finish."
+                else:
+                    reply = f"Picture {count} saved! Send another one, or type DONE if you are done."
+                send_text(phone_id, customer_phone, reply)
+                CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
+            else:
+                send_text(phone_id, customer_phone, "Thank you, we have received your picture. Our team will check it.")
+            return "ok", 200
+
+        msg_text = msg_obj.get("text", {}).get("body", "")
+        CHATS[client["id"]][customer_phone].append({"from": "customer", "text": msg_text})
+
+        if (client["id"], customer_phone) in TAKEOVER:
+            return "ok", 200
+
+        # Language selection - first time
+        if customer_phone not in USER_LANG:
+            if msg_text.strip() == "1":
+                USER_LANG[customer_phone] = "en"
+                if client.get("mode") == "onboarding":
+                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
+                    reply = "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
+                else:
+                    reply = TEXTS["greeting_en"].format(biz=client["business"])
+            elif msg_text.strip() == "2":
+                USER_LANG[customer_phone] = "pg"
+                if client.get("mode") == "onboarding":
+                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
+                    reply = "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
+                else:
+                    reply = TEXTS["greeting_pg"].format(biz=client["business"])
+            else:
+                reply = TEXTS["choose_lang"].format(biz=client["business"])
+            send_text(phone_id, customer_phone, reply)
+            CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
+            return "ok", 200
+
+        if client.get("mode") == "onboarding":
+            reply = handle_onboarding(client, customer_phone, msg_text)
+        else:
+            reply = handle_client_bot(client, customer_phone, msg_text, phone_id)
+
+        send_text(phone_id, customer_phone, reply)
+        CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
+    except Exception as e:
+        print("ERROR:", e)
+    return "ok", 200
+
+# --- Dashboard ---
+DASHBOARD_HTML = """
+<h2>Verticum Dashboard</h2>
+<p><a href='/dashboard/add-client'>+ Add New Client</a></p>
+<h3>All Clients</h3>
+{% for c in clients %}
+  <div style='border:1px solid #ccc;padding:10px;margin:10px'>
+    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - PhoneID: {{c.phone_id}}<br>
+    <a href='/dashboard/client/{{c.id}}'>View Chats</a>
+  </div>
+{% endfor %}
+<h3>Chats</h3>
+<p>Click a client to see chats, Take Over / Give Back, and reply.</p>
+"""
+
+@app.route("/dashboard")
+def dashboard():
+    return render_template_string(DASHBOARD_HTML, clients=load_clients())
+
+@app.route("/dashboard/client/<client_id>")
+def client_chats(client_id):
+    chats = CHATS.get(client_id, {})
+    html = f"<h2>{client_id} Chats</h2><a href='/dashboard'>Back</a><br><br>"
+    for phone, msgs in chats.items():
+        html += f"<h3>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back to Bot</a></h3>"
+        for m in msgs:
+            html += f"<p>{m}</p>"
+    return html
+
+@app.route("/dashboard/takeover/<client_id>/<phone>")
+def takeover(client_id, phone):
+    TAKEOVER.add((client_id, phone))
+    return f"Taken over {phone}. Bot paused. <a href='/dashboard'>Back</a>"
+
+@app.route("/dashboard/giveback/<client_id>/<phone>")
+def giveback(client_id, phone):
+    TAKEOVER.discard((client_id, phone))
+    return f"Gave back {phone} to bot. <a href='/dashboard'>Back</a>"
+
+@app.route("/dashboard/add-client", methods=["GET","POST"])
+def add_client():
+    if request.method=="POST":
+        clients = load_clients()
+        new = {"id": request.form["business"].lower().replace(" ",""), "business": request.form["business"], "phone_id": request.form["phone_id"], "mode": "client", "active": True, "products": [{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}]}
+        clients.append(new)
+        save_clients(clients)
+        return redirect("/dashboard")
+    return """
+    <h2>Add New Client - Fast Way (No GitHub needed)</h2>
+    <form method='POST'>
+      Business Name: <input name='business'><br>
+      Phone ID (from Meta): <input name='phone_id'><br>
+      Product Name: <input name='product_name'><br>
+      Price: <input name='price'><br>
+      Cloudinary Image Link: <input name='image' placeholder='https://res.cloudinary.com/...'><br>
+      <button>Add Client</button>
+    </form>
+    """
+
+@app.route("/")
+def home():
+    return "Verticum Bot is Live"
+
+if __name__ == "__main__":
+    app.run(port=5000)
