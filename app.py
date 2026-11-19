@@ -1,4 +1,4 @@
-import os, json, requests
+import os, json, requests, time, hashlib
 from flask import Flask, request, jsonify, render_template_string, session, redirect
 
 app = Flask(__name__)
@@ -7,8 +7,9 @@ app.secret_key = os.environ.get("SECRET_KEY", "verticum-secret")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "verticum-verify")
 CLOUDINARY_CLOUD = os.environ.get("CLOUDINARY_CLOUD_NAME", "demo")
+CLOUDINARY_KEY = os.environ.get("CLOUDINARY_API_KEY", "")
+CLOUDINARY_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "")
 
-# --- Load Clients ---
 def load_clients():
     try:
         with open("clients.json") as f:
@@ -25,7 +26,6 @@ USER_LANG = {}
 ONBOARDING = {}
 TAKEOVER = set()
 
-# --- WhatsApp Helpers ---
 def send_text(phone_id, to, text):
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
@@ -37,15 +37,56 @@ def send_text(phone_id, to, text):
 def send_image(phone_id, to, image_url, caption):
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp", "to": to, "type": "image",
-        "image": {"link": image_url, "caption": caption}
-    }
+    payload = {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"link": image_url, "caption": caption}}
     r = requests.post(url, headers=headers, json=payload)
     print("SEND IMAGE:", r.text)
     return r
 
-# --- Language Texts ---
+# --- NEW: WhatsApp -> Cloudinary Auto Upload ---
+def upload_to_cloudinary(image_bytes, business_name):
+    """Upload image bytes to Cloudinary, return secure_url or None"""
+    if not CLOUDINARY_KEY or not CLOUDINARY_SECRET:
+        print("CLOUDINARY keys missing - skipping upload")
+        return None
+    try:
+        timestamp = int(time.time())
+        folder = f"verticum/{business_name.lower().replace(' ','-')}"
+        # Signature for Cloudinary: folder + timestamp + secret
+        to_sign = f"folder={folder}&timestamp={timestamp}{CLOUDINARY_SECRET}"
+        signature = hashlib.sha1(to_sign.encode()).hexdigest()
+        url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD}/image/upload"
+        files = {"file": ("product.jpg", image_bytes, "image/jpeg")}
+        data = {"api_key": CLOUDINARY_KEY, "timestamp": timestamp, "folder": folder, "signature": signature}
+        r = requests.post(url, files=files, data=data, timeout=30)
+        print("CLOUDINARY:", r.text[:500])
+        if r.status_code == 200:
+            return r.json().get("secure_url")
+        return None
+    except Exception as e:
+        print("CLOUDINARY ERROR:", e)
+        return None
+
+def download_whatsapp_media_and_upload(media_id, business_name):
+    """1. Get WhatsApp media URL, 2. Download bytes, 3. Upload to Cloudinary"""
+    try:
+        # Step 1: Get download URL
+        meta_url = f"https://graph.facebook.com/v21.0/{media_id}"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        r1 = requests.get(meta_url, headers=headers, timeout=20)
+        print("MEDIA META:", r1.text)
+        download_url = r1.json().get("url")
+        if not download_url:
+            return None
+        # Step 2: Download image bytes
+        r2 = requests.get(download_url, headers=headers, timeout=30)
+        if r2.status_code != 200:
+            return None
+        # Step 3: Upload to Cloudinary
+        return upload_to_cloudinary(r2.content, business_name)
+    except Exception as e:
+        print("DOWNLOAD ERROR:", e)
+        return None
+
 TEXTS = {
     "choose_lang": "Welcome to {biz}! 👋\nHow do you want me to talk to you?\nReply 1 for English\nReply 2 for Pidgin",
     "greeting_en": "Hello, welcome to {biz}! How can we help you today? Type PRICE for prices, PICTURES to see products, or HUMAN to talk to a person.",
@@ -58,13 +99,11 @@ def get_client_by_phone_id(phone_id):
             return c
     return None
 
-# --- Onboarding Logic for Verticum ---
 def handle_onboarding(client, customer_phone, msg):
     state = ONBOARDING.get(customer_phone, {"step": 0, "data": {}})
     lang = USER_LANG.get(customer_phone, "en")
     low = msg.lower().strip()
     pg = (lang == "pg")
-
     if state["step"] == 0:
         ONBOARDING[customer_phone] = {"step": 1, "data": {}}
         if pg:
@@ -114,7 +153,7 @@ def handle_onboarding(client, customer_phone, msg):
             state["step"] = 7
             ONBOARDING[customer_phone] = state
             clients = load_clients()
-            clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "onboarding_data": state["data"], "phone_id": "", "products": []})
+            clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "status": "pending", "onboarding_data": state["data"], "phone_id": "", "products": []})
             save_clients(clients)
             count = len(state["data"].get("pictures", []))
             if pg:
@@ -125,12 +164,10 @@ def handle_onboarding(client, customer_phone, msg):
         return "Send your product pictures now, one by one. When you are done, type DONE."
     return "Type HELLO to start again."
 
-# --- Client Bot Logic ---
 def handle_client_bot(client, customer_phone, msg, phone_id):
     lang = USER_LANG.get(customer_phone, "en")
     low = msg.lower().strip()
     biz = client["business"]
-
     if low in ["price", "prices", "how much"]:
         lines = []
         for p in client.get("products", []):
@@ -156,7 +193,6 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
         return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person."
     return "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
 
-# --- Webhook ---
 @app.route("/webhook", methods=["GET"])
 def verify():
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
@@ -177,34 +213,33 @@ def webhook():
         client = get_client_by_phone_id(phone_id)
         if not client or not client.get("active", True):
             return "ok", 200
-
         CHATS.setdefault(client["id"], {}).setdefault(customer_phone, [])
-        # Handle image from customer
         if msg_obj.get("type") == "image":
             media_id = msg_obj["image"]["id"]
             CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id})
-            # If in onboarding picture step, save it
             if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone, {}).get("step") == 6:
-                ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(media_id)
+                biz_name = ONBOARDING[customer_phone]["data"].get("business", "verticum")
+                # NEW: Auto upload to Cloudinary
+                cloud_url = download_whatsapp_media_and_upload(media_id, biz_name)
+                if cloud_url:
+                    ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(cloud_url)
+                else:
+                    ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(f"media_id:{media_id}")
                 count = len(ONBOARDING[customer_phone]["data"]["pictures"])
                 lang = USER_LANG.get(customer_phone, "en")
                 if lang == "pg":
-                    reply = f"Picture {count} saved! Send another one, or type DONE if you don finish."
+                    reply = f"Picture {count} saved to Cloudinary! Send another one, or type DONE if you don finish."
                 else:
-                    reply = f"Picture {count} saved! Send another one, or type DONE if you are done."
+                    reply = f"Picture {count} saved to Cloudinary! Send another one, or type DONE if you are done."
                 send_text(phone_id, customer_phone, reply)
                 CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
             else:
                 send_text(phone_id, customer_phone, "Thank you, we have received your picture. Our team will check it.")
             return "ok", 200
-
         msg_text = msg_obj.get("text", {}).get("body", "")
         CHATS[client["id"]][customer_phone].append({"from": "customer", "text": msg_text})
-
         if (client["id"], customer_phone) in TAKEOVER:
             return "ok", 200
-
-        # Language selection - first time
         if customer_phone not in USER_LANG:
             if msg_text.strip() == "1":
                 USER_LANG[customer_phone] = "en"
@@ -225,31 +260,32 @@ def webhook():
             send_text(phone_id, customer_phone, reply)
             CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
             return "ok", 200
-
         if client.get("mode") == "onboarding":
             reply = handle_onboarding(client, customer_phone, msg_text)
         else:
             reply = handle_client_bot(client, customer_phone, msg_text, phone_id)
-
         send_text(phone_id, customer_phone, reply)
         CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
     except Exception as e:
         print("ERROR:", e)
     return "ok", 200
 
-# --- Dashboard ---
 DASHBOARD_HTML = """
 <h2>Verticum Dashboard</h2>
 <p><a href='/dashboard/add-client'>+ Add New Client</a></p>
 <h3>All Clients</h3>
 {% for c in clients %}
   <div style='border:1px solid #ccc;padding:10px;margin:10px'>
-    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - PhoneID: {{c.phone_id}}<br>
-    <a href='/dashboard/client/{{c.id}}'>View Chats</a>
+    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - Status: {{c.get('status','pending')}} - PhoneID: {{c.phone_id}}<br>
+    <a href='/dashboard/client/{{c.id}}'>View Chats</a> |
+    {% if c.active %}
+      <a href='/dashboard/deactivate/{{c.id}}'>Deactivate</a> |
+    {% else %}
+      <a href='/dashboard/activate/{{c.id}}'>Activate</a> |
+    {% endif %}
+    <a href='/dashboard/delete/{{c.id}}' onclick="return confirm('Delete {{c.business}}? This cannot be undone.')">Delete</a>
   </div>
 {% endfor %}
-<h3>Chats</h3>
-<p>Click a client to see chats, Take Over / Give Back, and reply.</p>
 """
 
 @app.route("/dashboard")
@@ -276,16 +312,44 @@ def giveback(client_id, phone):
     TAKEOVER.discard((client_id, phone))
     return f"Gave back {phone} to bot. <a href='/dashboard'>Back</a>"
 
+@app.route("/dashboard/delete/<client_id>")
+def delete_client(client_id):
+    clients = load_clients()
+    clients = [c for c in clients if c.get("id") != client_id]
+    save_clients(clients)
+    CHATS.pop(client_id, None)
+    return redirect("/dashboard")
+
+@app.route("/dashboard/activate/<client_id>")
+def activate_client(client_id):
+    clients = load_clients()
+    for c in clients:
+        if c.get("id") == client_id:
+            c["active"] = True
+            c["status"] = "active"
+    save_clients(clients)
+    return redirect("/dashboard")
+
+@app.route("/dashboard/deactivate/<client_id>")
+def deactivate_client(client_id):
+    clients = load_clients()
+    for c in clients:
+        if c.get("id") == client_id:
+            c["active"] = False
+            c["status"] = "paused"
+    save_clients(clients)
+    return redirect("/dashboard")
+
 @app.route("/dashboard/add-client", methods=["GET","POST"])
 def add_client():
     if request.method=="POST":
         clients = load_clients()
-        new = {"id": request.form["business"].lower().replace(" ",""), "business": request.form["business"], "phone_id": request.form["phone_id"], "mode": "client", "active": True, "products": [{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}]}
+        new = {"id": request.form["business"].lower().replace(" ",""), "business": request.form["business"], "phone_id": request.form["phone_id"], "mode": "client", "active": True, "status": "active", "products": [{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}]}
         clients.append(new)
         save_clients(clients)
         return redirect("/dashboard")
     return """
-    <h2>Add New Client - Fast Way (No GitHub needed)</h2>
+    <h2>Add New Client - Fast Way</h2>
     <form method='POST'>
       Business Name: <input name='business'><br>
       Phone ID (from Meta): <input name='phone_id'><br>
