@@ -16,10 +16,25 @@ def load_clients():
 def save_clients(clients):
     with open("clients.json", "w") as f: json.dump(clients, f, indent=2)
 
-CHATS = {}
+# NEW: Persistent chats - saved to file, not memory only
+def load_chats():
+    try:
+        with open("chats.json") as f: return json.load(f)
+    except: return {}
+def save_chats(chats):
+    with open("chats.json", "w") as f: json.dump(chats, f, indent=2)
+
+CHATS = load_chats()
 USER_LANG = {}
 ONBOARDING = {}
 TAKEOVER = set()
+
+def add_chat(client_id, customer_phone, msg_obj):
+    # msg_obj = {"from": "customer"/"bot", "text": "..."} or image
+    if client_id not in CHATS: CHATS[client_id] = {}
+    if customer_phone not in CHATS[client_id]: CHATS[client_id][customer_phone] = []
+    CHATS[client_id][customer_phone].append(msg_obj)
+    save_chats(CHATS)
 
 def send_text(phone_id, to, text):
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
@@ -144,8 +159,14 @@ def handle_onboarding(client, customer_phone, msg):
         if low=="done":
             state["step"]=7; ONBOARDING[customer_phone]=state
             clients=load_clients()
-            clients.append({"id": state["data"]["business"].lower().replace(" ","").replace(".",""), "business": state["data"]["business"], "mode":"client", "active":False, "status":"pending", "onboarding_data": state["data"], "phone_id":"", "products": state["data"].get("products",[]), "faqs": state["data"].get("faqs",[])})
+            new_id = state["data"]["business"].lower().replace(" ","").replace(".","")
+            clients.append({"id": new_id, "business": state["data"]["business"], "mode":"client", "active":False, "status":"pending", "onboarding_data": state["data"], "phone_id":"", "products": state["data"].get("products",[]), "faqs": state["data"].get("faqs",[])})
             save_clients(clients)
+            # NEW: Copy onboarding chats from Verticum to new client so View Chats works
+            if client["id"] in CHATS and customer_phone in CHATS[client["id"]]:
+                if new_id not in CHATS: CHATS[new_id] = {}
+                CHATS[new_id][customer_phone] = CHATS[client["id"]][customer_phone].copy()
+                save_chats(CHATS)
             count=len(state["data"].get("products",[])); fcount=len(state["data"].get("faqs",[]))
             return f"Perfect! We don save {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s). Our team go contact you to connect your number and launch your bot. Thank you!" if pg else f"Perfect! We have saved {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s). Our team will contact you to connect your number and launch your bot. Thank you!"
         faq_text = msg
@@ -223,10 +244,9 @@ def webhook():
         if not client.get("active",True):
             print(f"Client {client['business']} is inactive")
             return "ok",200
-        CHATS.setdefault(client["id"],{}).setdefault(customer_phone,[])
         if msg_obj.get("type")=="image":
             media_id=msg_obj["image"]["id"]
-            CHATS[client["id"]][customer_phone].append({"from":"customer","type":"image","media_id":media_id})
+            add_chat(client["id"], customer_phone, {"from":"customer","type":"image","media_id":media_id})
             if client.get("mode")=="onboarding" and ONBOARDING.get(customer_phone,{}).get("step")==5:
                 if ONBOARDING[customer_phone]["data"].get("pending_image"):
                     lang=USER_LANG.get(customer_phone,"en")
@@ -238,12 +258,12 @@ def webhook():
                 ONBOARDING[customer_phone]["data"]["pending_image"]=cloud_url
                 lang=USER_LANG.get(customer_phone,"en")
                 reply="Picture saved to Cloudinary! Wetin be name and price for this picture? e.g. Frontal 65k" if lang=="pg" else "Picture saved to Cloudinary! What is the name and price for this picture? e.g. Frontal 65k"
-                send_text(phone_id,customer_phone,reply); CHATS[client["id"]][customer_phone].append({"from":"bot","text":reply})
+                send_text(phone_id,customer_phone,reply); add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
             else:
                 send_text(phone_id,customer_phone,"Thank you, we have received your picture. Our team will check it.")
             return "ok",200
         msg_text=msg_obj.get("text",{}).get("body","")
-        CHATS[client["id"]][customer_phone].append({"from":"customer","text":msg_text})
+        add_chat(client["id"], customer_phone, {"from":"customer","text":msg_text})
         if (client["id"],customer_phone) in TAKEOVER: return "ok",200
         if customer_phone not in USER_LANG:
             if msg_text.strip()=="1":
@@ -255,16 +275,16 @@ def webhook():
                 if client.get("mode")=="onboarding": ONBOARDING[customer_phone]={"step":1,"data":{}}; reply="Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
                 else: reply=TEXTS["greeting_pg"].format(biz=client["business"])
             else: reply=TEXTS["choose_lang"].format(biz=client["business"])
-            send_text(phone_id,customer_phone,reply); CHATS[client["id"]][customer_phone].append({"from":"bot","text":reply}); return "ok",200
+            send_text(phone_id,customer_phone,reply); add_chat(client["id"], customer_phone, {"from":"bot","text":reply}); return "ok",200
         if client.get("mode")=="onboarding": reply=handle_onboarding(client,customer_phone,msg_text)
         else: reply=handle_client_bot(client,customer_phone,msg_text,phone_id)
-        send_text(phone_id,customer_phone,reply); CHATS[client["id"]][customer_phone].append({"from":"bot","text":reply})
+        send_text(phone_id,customer_phone,reply); add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
     except Exception as e: print("ERROR:",e)
     return "ok",200
 
 DASHBOARD_HTML = """
 <h2>Verticum Dashboard</h2>
-<p><a href='/dashboard/add-client'>+ Add New Client</a></p>
+<p><a href='/dashboard/add-client'>+ Add New Client</a> | <a href='/dashboard/all-chats'>View ALL Chats (Verticum Onboarding)</a></p>
 <h3>All Clients - Each client = One Phone ID = One WhatsApp Number</h3>
 {% for c in clients %}
   <div style='border:1px solid #ccc;padding:12px;margin:10px'>
@@ -284,27 +304,66 @@ DASHBOARD_HTML = """
 """
 @app.route("/dashboard")
 def dashboard(): return render_template_string(DASHBOARD_HTML, clients=load_clients())
+@app.route("/dashboard/all-chats")
+def all_chats():
+    chats = load_chats()
+    html = "<h2>ALL Chats - Verticum Onboarding (Where Daniel, Sandra, etc. first chat)</h2><a href='/dashboard'>Back</a><br><br>"
+    # Show Verticum onboarding chats - this is where new leads chat first
+    for client_id, phones in chats.items():
+        html += f"<h3>Client ID: {client_id}</h3>"
+        for phone, msgs in phones.items():
+            html += f"<h4>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back</a></h4>"
+            for m in msgs:
+                if m.get("type")=="image": html += f"<p><b>{m.get('from')}:</b> [IMAGE sent - {m.get('media_id')}]</p>"
+                else: html += f"<p><b>{m.get('from')}:</b> {m.get('text')}</p>"
+    if not chats: html += "<p>No chats saved yet. Chats go appear here after you deploy this new code and someone chats again. Old chats wey don wipe for memory no fit come back.</p>"
+    return html
+@app.route("/dashboard/client/<client_id>")
+def client_chats(client_id):
+    chats = load_chats()
+    # Find client to get business name
+    clients = load_clients()
+    biz_name = client_id
+    for c in clients:
+        if c.get("id")==client_id: biz_name = c.get("business", client_id)
+    html=f"<h2>{biz_name} Chats</h2><a href='/dashboard'>Back</a> | <a href='/dashboard/all-chats'>View ALL Chats</a><br><br>"
+    found = False
+    # 1. Chats under this client id
+    if client_id in chats:
+        found = True
+        for phone,msgs in chats[client_id].items():
+            html+=f"<h3>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back to Bot</a></h3>"
+            for m in msgs:
+                if m.get("type")=="image": html+=f"<p><b>{m.get('from')}:</b> [IMAGE]</p>"
+                else: html+=f"<p><b>{m.get('from')}:</b> {m.get('text')}</p>"
+    # 2. Also check Verticum onboarding chats that mention this business name
+    for cid, phones in chats.items():
+        if cid == client_id: continue
+        for phone, msgs in phones.items():
+            text_all = " ".join([str(m.get("text","")) for m in msgs]).lower()
+            if biz_name.lower() in text_all and biz_name.lower() not in ["verticum"]:
+                found = True
+                html+=f"<h3>{phone} (from onboarding - {cid}) <a href='/dashboard/takeover/{cid}/{phone}'>Take Over</a></h3>"
+                for m in msgs:
+                    if m.get("type")=="image": html+=f"<p><b>{m.get('from')}:</b> [IMAGE]</p>"
+                    else: html+=f"<p><b>{m.get('from')}:</b> {m.get('text')}</p>"
+    if not found:
+        html+=f"<p>No chats yet for {biz_name}.</p><p>If {biz_name} never finish onboarding, him chats dey under <b>Verticum</b>. Go to <a href='/dashboard/all-chats'>View ALL Chats</a> to see am. After e finish onboarding, future chats go copy to here automatically.</p>"
+    return html
 @app.route("/dashboard/update-phone/<client_id>", methods=["POST"])
 def update_phone(client_id):
     clients=load_clients()
     for c in clients:
         if c.get("id")==client_id: c["phone_id"]=request.form["phone_id"].strip()
     save_clients(clients); return redirect("/dashboard")
-@app.route("/dashboard/client/<client_id>")
-def client_chats(client_id):
-    chats=CHATS.get(client_id,{})
-    html=f"<h2>{client_id} Chats</h2><a href='/dashboard'>Back</a><br><br>"
-    for phone,msgs in chats.items():
-        html+=f"<h3>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back to Bot</a></h3>"
-        for m in msgs: html+=f"<p>{m}</p>"
-    return html
 @app.route("/dashboard/takeover/<client_id>/<phone>")
 def takeover(client_id,phone): TAKEOVER.add((client_id,phone)); return f"Taken over {phone}. Bot paused. <a href='/dashboard'>Back</a>"
 @app.route("/dashboard/giveback/<client_id>/<phone>")
 def giveback(client_id,phone): TAKEOVER.discard((client_id,phone)); return f"Gave back {phone} to bot. <a href='/dashboard'>Back</a>"
 @app.route("/dashboard/delete/<client_id>")
 def delete_client(client_id):
-    clients=load_clients(); clients=[c for c in clients if c.get("id")!=client_id]; save_clients(clients); CHATS.pop(client_id,None); return redirect("/dashboard")
+    clients=load_clients(); clients=[c for c in clients if c.get("id")!=client_id]; save_clients(clients)
+    chats=load_chats(); chats.pop(client_id,None); save_chats(chats); return redirect("/dashboard")
 @app.route("/dashboard/activate/<client_id>")
 def activate_client(client_id):
     clients=load_clients()
