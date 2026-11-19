@@ -174,10 +174,18 @@ def webhook():
         if customer_phone not in USER_LANG:
             if msg_text.strip() == "1":
                 USER_LANG[customer_phone] = "en"
-                reply = TEXTS["greeting_en"].format(biz=client["business"])
+                if client.get("mode") == "onboarding":
+                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
+                    reply = "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
+                else:
+                    reply = TEXTS["greeting_en"].format(biz=client["business"])
             elif msg_text.strip() == "2":
                 USER_LANG[customer_phone] = "pg"
-                reply = TEXTS["greeting_pg"].format(biz=client["business"])
+                if client.get("mode") == "onboarding":
+                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
+                    reply = "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
+                else:
+                    reply = TEXTS["greeting_pg"].format(biz=client["business"])
             else:
                 reply = TEXTS["choose_lang"].format(biz=client["business"])
             send_text(phone_id, customer_phone, reply)
