@@ -1,295 +1,264 @@
-import os
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
-from flask_sqlalchemy import SQLAlchemy
-import requests
+import os, json, requests
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "verticum-secret-change-this")
+app.secret_key = os.environ.get("SECRET_KEY", "verticum-secret")
 
-# --- DATABASE: Render Postgres if available, else SQLite for local test ---
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL or "sqlite:///verticum.db"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-db = SQLAlchemy(app)
-
-WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "verticum-verify")
-PHONE_ID = os.environ.get("PHONE_ID", "")
+CLOUDINARY_CLOUD = os.environ.get("CLOUDINARY_CLOUD_NAME", "demo")
 
-# --- MODELS ---
-class Client(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    business_name = db.Column(db.String(100), nullable=False)
-    whatsapp_number = db.Column(db.String(30), unique=True) # Business number
-    login_email = db.Column(db.String(100), unique=True)
-    login_password = db.Column(db.String(100), default="1234")
-    language = db.Column(db.String(20), default="Pidgin") # Pidgin / English
-    is_active = db.Column(db.Boolean, default=True)
+# --- Load Clients ---
+def load_clients():
+    try:
+        with open("clients.json") as f:
+            return json.load(f)
+    except:
+        return []
 
-class Customer(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    client_id = db.Column(db.Integer, db.ForeignKey("client.id"))
-    phone = db.Column(db.String(30))
-    name = db.Column(db.String(100), default="Customer")
-    mode = db.Column(db.String(20), default="bot") # bot / human
-    human_until = db.Column(db.DateTime, nullable=True)
-    support_access_until = db.Column(db.DateTime, nullable=True)
-    last_message_at = db.Column(db.DateTime, default=datetime.utcnow)
+def save_clients(clients):
+    with open("clients.json", "w") as f:
+        json.dump(clients, f, indent=2)
 
-class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    customer_id = db.Column(db.Integer, db.ForeignKey("customer.id"))
-    client_id = db.Column(db.Integer, db.ForeignKey("client.id"))
-    sender = db.Column(db.String(20)) # customer / bot / human
-    text = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+# In-memory store for demo: chats, language, onboarding state, takeover
+# For production, move this to SQLite / Postgres
+CHATS = {}  # {client_id: {customer_phone: [messages]}}
+USER_LANG = {}  # {customer_phone: "en" or "pg"}
+ONBOARDING = {} # {customer_phone: {step, data}}
+TAKEOVER = set() # set of (client_id, customer_phone) where human took over
 
-# --- HELPERS ---
-def send_whatsapp(to, text):
-    if not WHATSAPP_TOKEN or not PHONE_ID:
-        print(f"[MOCK SEND] To {to}: {text}")
-        return True
-    url = f"https://graph.facebook.com/v18.0/{PHONE_ID}/messages"
+# --- WhatsApp Helpers ---
+def send_text(phone_id, to, text):
+    url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
     r = requests.post(url, headers=headers, json=payload)
-    print(r.text)
-    return r.status_code == 200
+    print("SEND TEXT:", r.text)
+    return r
 
-def bot_reply(client, customer, text):
-    # Simple demo bot logic - you will replace with your real bot logic
-    text_low = text.lower()
-    if "price" in text_low or "how much" in text_low:
-        if client.business_name == "Glow Hair":
-            return "Our frontal wig na ₦85,000, bone straight na ₦120,000. Which one you want? I fit send you pictures."
-        else:
-            return "Our Ofada rice na ₦5,500 per plate with chicken. You want make we package am for you?"
-    if "hello" in text_low or "hi" in text_low:
-        if client.language == "Pidgin":
-            return f"Hello my customer, welcome to {client.business_name}! How we fit help you today?"
-        return f"Hello, welcome to {client.business_name}! How can we help you?"
-    return "Thanks for your message. Our team go reply you soon. You fit also tell me which product you want?"
+def send_image(phone_id, to, image_url, caption):
+    url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messaging_product": "whatsapp", "to": to, "type": "image",
+        "image": {"link": image_url, "caption": caption}
+    }
+    r = requests.post(url, headers=headers, json=payload)
+    print("SEND IMAGE:", r.text)
+    return r
 
-# --- WEBHOOK ---
+# --- Language Texts ---
+TEXTS = {
+    "choose_lang": "Welcome to {biz}! 👋\nHow do you want me to talk to you?\nReply 1 for English\nReply 2 for Pidgin",
+    "greeting_en": "Hello, welcome to {biz}! How can we help you today? Type PRICE for prices, PICTURES to see products, or HUMAN to talk to a person.",
+    "greeting_pg": "Hello my customer, welcome to {biz}! How we fit help you today? Type PRICE for price, PICTURES to see products, or HUMAN to talk to person.",
+}
+
+def get_client_by_phone_id(phone_id):
+    for c in load_clients():
+        if str(c.get("phone_id")) == str(phone_id):
+            return c
+    return None
+
+# --- Onboarding Logic for Verticum ---
+def handle_onboarding(client, customer_phone, msg):
+    state = ONBOARDING.get(customer_phone, {"step": 0, "data": {}})
+    lang = USER_LANG.get(customer_phone, "en")
+    # Step 0 = ask business name
+    if state["step"] == 0:
+        ONBOARDING[customer_phone] = {"step": 1, "data": {}}
+        if lang == "pg":
+            return "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
+        return "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
+    if state["step"] == 1:
+        state["data"]["business"] = msg
+        state["step"] = 2
+        ONBOARDING[customer_phone] = state
+        return "What do you sell? (e.g. Wigs, Food, Clothes)" if lang=="en" else "Wetin you dey sell? (e.g. Wigs, Food, Clothes)"
+    if state["step"] == 2:
+        state["data"]["products_text"] = msg
+        state["step"] = 3
+        ONBOARDING[customer_phone] = state
+        return "What are your prices? (e.g. Frontal ₦85k)" if lang=="en" else "How much be your prices? (e.g. Frontal ₦85k)"
+    if state["step"] == 3:
+        state["data"]["prices"] = msg
+        state["step"] = 4
+        ONBOARDING[customer_phone] = state
+        return "Where are you located / Do you deliver?" if lang=="en" else "Where you dey / You dey deliver?"
+    if state["step"] == 4:
+        state["data"]["location"] = msg
+        state["step"] = 5
+        ONBOARDING[customer_phone] = state
+        # Save as pending client
+        clients = load_clients()
+        clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "onboarding_data": state["data"], "phone_id": "", "products": []})
+        save_clients(clients)
+        if lang=="pg":
+            return f"Thank you! We don save {state['data']['business']}. Our team go contact you to connect your number and add your product pictures for Cloudinary."
+        return f"Thank you! We have saved {state['data']['business']}. Our team will contact you to connect your number and add your product pictures on Cloudinary."
+    return "Type HELLO to start again."
+
+# --- Client Bot Logic ---
+def handle_client_bot(client, customer_phone, msg, phone_id):
+    lang = USER_LANG.get(customer_phone, "en")
+    low = msg.lower().strip()
+    biz = client["business"]
+
+    if low in ["price", "prices", "how much"]:
+        lines = []
+        for p in client.get("products", []):
+            lines.append(f"{p['name']} - {p['price']}")
+        if lang=="pg":
+            return "Our prices be:\n" + "\n".join(lines) + "\nType PICTURES to see dem."
+        return "Our prices are:\n" + "\n".join(lines) + "\nType PICTURES to see them."
+    if low in ["pictures", "picture", "send pictures", "show me pictures", "images"]:
+        # Send images via Cloudinary links
+        for p in client.get("products", []):
+            if p.get("image"):
+                send_image(phone_id, customer_phone, p["image"], f"{p['name']} - {p['price']}")
+        if lang=="pg":
+            return "I don send the pictures above. Which one you want?"
+        return "I have sent the pictures above. Which one would you like?"
+    if low in ["human", "person", "agent", "talk to person"]:
+        TAKEOVER.add((client["id"], customer_phone))
+        return "A human will reply you shortly. Please wait." if lang=="en" else "Person go reply you soon. Abeg wait small."
+    if low in ["hello", "hi", "hey"]:
+        if lang=="pg":
+            return client.get("greeting_pg", f"Hello, welcome to {biz}!")
+        return client.get("greeting_en", f"Hello, welcome to {biz}!")
+    # Default
+    if lang=="pg":
+        return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person."
+    return "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
+
+# --- Webhook ---
 @app.route("/webhook", methods=["GET"])
 def verify():
     if request.args.get("hub.verify_token") == VERIFY_TOKEN:
-        return request.args.get("hub.challenge"), 200
+        return request.args.get("hub.challenge")
     return "Invalid", 403
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
+    print(data)
     try:
         entry = data["entry"][0]["changes"][0]["value"]
         if "messages" not in entry:
             return "ok", 200
-        msg = entry["messages"][0]
-        from_phone = msg["from"]
-        body = msg.get("text", {}).get("body", "")
-        # Find which client this message is for - via metadata phone_number_id or to field
-        # For demo: we map by checking which client is active - in production, use phone_number_id mapping
-        # Here we use first active client for simplicity, you will map PHONE_ID -> Client
-        client = Client.query.filter_by(is_active=True).first()
-        if not client:
+        msg_obj = entry["messages"][0]
+        customer_phone = msg_obj["from"]
+        phone_id = entry["metadata"]["phone_number_id"]
+        client = get_client_by_phone_id(phone_id)
+        if not client or not client.get("active", True):
             return "ok", 200
 
-        customer = Customer.query.filter_by(client_id=client.id, phone=from_phone).first()
-        if not customer:
-            customer = Customer(client_id=client.id, phone=from_phone, name=f"Customer {from_phone[-4:]}")
-            db.session.add(customer)
-            db.session.commit()
+        # Save chat
+        CHATS.setdefault(client["id"], {}).setdefault(customer_phone, [])
+        # Handle image from customer -> save to Cloudinary (placeholder: log media id)
+        if msg_obj.get("type") == "image":
+            media_id = msg_obj["image"]["id"]
+            CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id, "note": "Saved to Cloudinary - download via Graph API then upload"})
+            # TODO: Download via https://graph.facebook.com/v21.0/{media_id} then upload to Cloudinary
+            send_text(phone_id, customer_phone, "Thank you, we have received your picture. Our team will check it." )
+            return "ok", 200
 
-        # Save customer message
-        db.session.add(Message(customer_id=customer.id, client_id=client.id, sender="customer", text=body))
-        customer.last_message_at = datetime.utcnow()
-        db.session.commit()
+        msg_text = msg_obj.get("text", {}).get("body", "")
+        CHATS[client["id"]][customer_phone].append({"from": "customer", "text": msg_text})
 
-        # PRIVACY + TAKEOVER CHECK: If mode == human, DO NOT REPLY
-        if customer.mode == "human":
-            # Check auto-release after 30 mins
-            if customer.human_until and datetime.utcnow() > customer.human_until:
-                customer.mode = "bot"
-                db.session.commit()
+        # Takeover check
+        if (client["id"], customer_phone) in TAKEOVER:
+            return "ok", 200
+
+        # Language selection - first time
+        if customer_phone not in USER_LANG:
+            if msg_text.strip() == "1":
+                USER_LANG[customer_phone] = "en"
+                reply = TEXTS["greeting_en"].format(biz=client["business"])
+            elif msg_text.strip() == "2":
+                USER_LANG[customer_phone] = "pg"
+                reply = TEXTS["greeting_pg"].format(biz=client["business"])
             else:
-                print(f"Human mode - bot paused for {from_phone}")
-                return "ok", 200
+                reply = TEXTS["choose_lang"].format(biz=client["business"])
+            send_text(phone_id, customer_phone, reply)
+            CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
+            return "ok", 200
 
-        # Bot replies
-        reply = bot_reply(client, customer, body)
-        send_whatsapp(from_phone, reply)
-        db.session.add(Message(customer_id=customer.id, client_id=client.id, sender="bot", text=reply))
-        db.session.commit()
+        # Route
+        if client.get("mode") == "onboarding":
+            reply = handle_onboarding(client, customer_phone, msg_text)
+        else:
+            reply = handle_client_bot(client, customer_phone, msg_text, phone_id)
+
+        send_text(phone_id, customer_phone, reply)
+        CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
     except Exception as e:
-        print("Webhook error:", e)
+        print("ERROR:", e)
     return "ok", 200
 
-# --- DASHBOARD ---
-LOGIN_HTML = """
-<h2>Verticum Login</h2>
-<form method="post">
-Email: <input name="email"><br><br>
-Password: <input name="password" type="password"><br><br>
-<button>Login</button>
-</form>
-<p>Demo Admin: admin@verticum.com / admin123<br>Demo Glow Hair: glow@glow.com / 1234<br>Demo Mama Nkechi: nkechi@food.com / 1234</p>
+# --- Dashboard ---
+DASHBOARD_HTML = """
+<h2>Verticum Dashboard</h2>
+<p><a href='/dashboard/add-client'>+ Add New Client</a></p>
+<h3>All Clients</h3>
+{% for c in clients %}
+  <div style='border:1px solid #ccc;padding:10px;margin:10px'>
+    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - PhoneID: {{c.phone_id}}<br>
+    <a href='/dashboard/client/{{c.id}}'>View Chats</a>
+  </div>
+{% endfor %}
+<h3>Chats</h3>
+<p>Click a client to see chats, Take Over / Give Back, and reply.</p>
 """
-
-@app.route("/login", methods=["GET","POST"])
-def login():
-    if request.method == "POST":
-        email = request.form.get("email")
-        pwd = request.form.get("password")
-        if email == "admin@verticum.com" and pwd == "admin123":
-            session["role"] = "admin"
-            session["client_id"] = None
-            return redirect("/dashboard")
-        c = Client.query.filter_by(login_email=email, login_password=pwd).first()
-        if c:
-            session["role"] = "client"
-            session["client_id"] = c.id
-            return redirect("/dashboard")
-        return "Wrong login <a href='/login'>Try again</a>"
-    return LOGIN_HTML
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
 
 @app.route("/dashboard")
 def dashboard():
-    if "role" not in session:
-        return redirect("/login")
-    if session["role"] == "admin":
-        clients = Client.query.all()
-        html = "<h1>Verticum Admin - Overview (Privacy Mode)</h1><p>You see overview only. Full chats are hidden until client grants Support Access.</p><a href='/logout'>Logout</a><hr>"
-        for c in clients:
-            count = Customer.query.filter_by(client_id=c.id).count()
-            msgs = Message.query.filter_by(client_id=c.id).count()
-            html += f"<div><b>{c.business_name}</b> - {count} customers, {msgs} messages - <a href='/admin/client/{c.id}'>View Overview</a></div><br>"
-        return html
-    else:
-        client = Client.query.get(session["client_id"])
-        customers = Customer.query.filter_by(client_id=client.id).order_by(Customer.last_message_at.desc()).all()
-        html = f"<h1>{client.business_name} - Inbox</h1><a href='/logout'>Logout</a><hr>"
-        for cust in customers:
-            badge = "🟢 BOT" if cust.mode=="bot" else "🔴 HUMAN TAKEN OVER"
-            html += f"<div><b>{cust.name} ({cust.phone})</b> - {badge} - <a href='/chat/{cust.id}'>Open Chat</a></div><br>"
-        return html
+    # Simple admin check - for now open, add login later
+    return render_template_string(DASHBOARD_HTML, clients=load_clients())
 
-@app.route("/admin/client/<int:client_id>")
-def admin_client(client_id):
-    if session.get("role") != "admin":
-        return redirect("/login")
-    client = Client.query.get(client_id)
-    customers = Customer.query.filter_by(client_id=client.id).all()
-    html = f"<h2>{client.business_name} - Admin Overview</h2><a href='/dashboard'>Back</a><hr>"
-    for cust in customers:
-        # Privacy: show only metadata, not message content unless support access granted
-        has_access = cust.support_access_until and cust.support_access_until > datetime.utcnow()
-        if has_access:
-            html += f"<div>{cust.name} - <a href='/chat/{cust.id}'>View Full Chat (Support Access Active)</a></div>"
-        else:
-            html += f"<div>{cust.name} - Messages hidden for privacy. Client must click 'Grant Support Access' to allow viewing. - Last active: {cust.last_message_at}</div>"
-        html += "<br>"
+@app.route("/dashboard/client/<client_id>")
+def client_chats(client_id):
+    chats = CHATS.get(client_id, {})
+    html = f"<h2>{client_id} Chats</h2><a href='/dashboard'>Back</a><br><br>"
+    for phone, msgs in chats.items():
+        html += f"<h3>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back to Bot</a></h3>"
+        for m in msgs:
+            html += f"<p>{m}</p>"
     return html
 
-@app.route("/chat/<int:customer_id>", methods=["GET"])
-def chat_view(customer_id):
-    if "role" not in session:
-        return redirect("/login")
-    cust = Customer.query.get(customer_id)
-    # Client can only see own chats
-    if session["role"] == "client" and session["client_id"] != cust.client_id:
-        return "Not allowed"
-    # Admin can only see if support access granted
-    if session["role"] == "admin":
-        if not cust.support_access_until or cust.support_access_until < datetime.utcnow():
-            return "Privacy Protected: Client has not granted Support Access. Ask client to click 'Grant Support Access'."
-    msgs = Message.query.filter_by(customer_id=cust.id).order_by(Message.created_at).all()
-    client = Client.query.get(cust.client_id)
-    html = f"<h2>Chat with {cust.name} - {client.business_name}</h2>"
-    html += f"<p>Mode: <b>{cust.mode.upper()}</b></p>"
-    html += f"<a href='/takeover/{cust.id}'>[ TAKE OVER CHAT ]</a> | <a href='/release/{cust.id}'>[ GIVE BACK TO BOT ]</a> | "
-    if session["role"] == "client":
-        html += f"<a href='/grant-support/{cust.id}'>[ Grant Support Access to Verticum - 1 Hour ]</a> | "
-    html += f"<a href='/dashboard'>Back to Inbox</a><hr>"
-    for m in msgs:
-        color = "blue" if m.sender=="customer" else "green" if m.sender=="bot" else "red"
-        html += f"<div style='color:{color}'><b>{m.sender}:</b> {m.text} <small>({m.created_at})</small></div><br>"
-    html += f"""
-    <form method="post" action="/send/{cust.id}">
-    <input name="text" style="width:300px" placeholder="Type reply...">
-    <button>Send</button>
+@app.route("/dashboard/takeover/<client_id>/<phone>")
+def takeover(client_id, phone):
+    TAKEOVER.add((client_id, phone))
+    return f"Taken over {phone}. Bot paused. <a href='/dashboard'>Back</a>"
+
+@app.route("/dashboard/giveback/<client_id>/<phone>")
+def giveback(client_id, phone):
+    TAKEOVER.discard((client_id, phone))
+    return f"Gave back {phone} to bot. <a href='/dashboard'>Back</a>"
+
+@app.route("/dashboard/add-client", methods=["GET","POST"])
+def add_client():
+    if request.method=="POST":
+        clients = load_clients()
+        new = {"id": request.form["business"].lower().replace(" ",""), "business": request.form["business"], "phone_id": request.form["phone_id"], "mode": "client", "active": True, "products": [{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}]}
+        clients.append(new)
+        save_clients(clients)
+        return redirect("/dashboard")
+    return """
+    <h2>Add New Client - Fast Way (No GitHub needed)</h2>
+    <form method='POST'>
+      Business Name: <input name='business'><br>
+      Phone ID (from Meta): <input name='phone_id'><br>
+      Product Name: <input name='product_name'><br>
+      Price: <input name='price'><br>
+      Cloudinary Image Link: <input name='image' placeholder='https://res.cloudinary.com/...'><br>
+      <button>Add Client</button>
     </form>
     """
-    return html
-
-@app.route("/takeover/<int:customer_id>")
-def takeover(customer_id):
-    cust = Customer.query.get(customer_id)
-    cust.mode = "human"
-    cust.human_until = datetime.utcnow() + timedelta(minutes=30)
-    db.session.commit()
-    return redirect(f"/chat/{customer_id}")
-
-@app.route("/release/<int:customer_id>")
-def release(customer_id):
-    cust = Customer.query.get(customer_id)
-    cust.mode = "bot"
-    cust.human_until = None
-    db.session.commit()
-    return redirect(f"/chat/{customer_id}")
-
-@app.route("/grant-support/<int:customer_id>")
-def grant_support(customer_id):
-    cust = Customer.query.get(customer_id)
-    cust.support_access_until = datetime.utcnow() + timedelta(hours=1)
-    db.session.commit()
-    return f"Support Access granted for 1 hour. <a href='/chat/{customer_id}'>Back to chat</a>"
-
-@app.route("/send/<int:customer_id>", methods=["POST"])
-def send_msg(customer_id):
-    cust = Customer.query.get(customer_id)
-    text = request.form.get("text")
-    # When human sends, ensure mode is human
-    cust.mode = "human"
-    cust.human_until = datetime.utcnow() + timedelta(minutes=30)
-    db.session.add(Message(customer_id=cust.id, client_id=cust.client_id, sender="human", text=text))
-    db.session.commit()
-    send_whatsapp(cust.phone, text)
-    return redirect(f"/chat/{customer_id}")
 
 @app.route("/")
 def home():
-    return "Verticum is live. Go to /dashboard"
-
-# Seed demo data - Fixed for Flask 3.0 / Render
-def seed():
-    with app.app_context():
-        db.create_all()
-        if not Client.query.first():
-            c1 = Client(business_name="Glow Hair", whatsapp_number="+2348000000001", login_email="glow@glow.com", login_password="1234", language="Pidgin")
-            c2 = Client(business_name="Mama Nkechi Foods", whatsapp_number="+2348000000002", login_email="nkechi@food.com", login_password="1234", language="English")
-            db.session.add_all([c1,c2])
-            db.session.commit()
-            cust1 = Customer(client_id=c1.id, phone="+2348011111111", name="Ada - Glow Customer")
-            cust2 = Customer(client_id=c2.id, phone="+2348022222222", name="Chidi - Food Customer")
-            db.session.add_all([cust1,cust2])
-            db.session.commit()
-            db.session.add_all([
-                Message(customer_id=cust1.id, client_id=c1.id, sender="customer", text="Hello, how much is frontal wig?"),
-                Message(customer_id=cust1.id, client_id=c1.id, sender="bot", text="Our frontal wig na ₦85,000. Which one you want?"),
-                Message(customer_id=cust2.id, client_id=c2.id, sender="customer", text="Hello, how much is Ofada?"),
-                Message(customer_id=cust2.id, client_id=c2.id, sender="bot", text="Our Ofada rice na ₦5,500 per plate with chicken."),
-            ])
-            db.session.commit()
-
-seed()
+    return "Verticum Bot is Live"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(port=5000)
