@@ -9,15 +9,15 @@
   {
     "id": "glowhair",
     "business": "Glow Hair",
-    "phone_id": "1523576100829207",
+    "phone_id": "",
     "mode": "client",
-    "active": true,
+    "active": false,
     "owner_phone": "2348039113437",
     "greeting_en": "Hello, welcome to Glow Hair! How can we help you today?",
     "greeting_pg": "Hello my customer, welcome to Glow Hair! How we fit help you today?",
     "products": [
-      {"name": "Frontal Wig", "price": "₦85,000", "image": "https://res.cloudinary.com/demo/image/upload/sample.jpg"},
-      {"name": "Bone Straight", "price": "₦120,000", "image": "https://res.cloudinary.com/demo/image/upload/sample2.jpg"}
+      {"name": "Frontal Wig", "price": "₦85,000", "image": "https://res.cloudinary.com/j0r4ymhm/image/upload/sample.jpg"},
+      {"name": "Bone Straight", "price": "₦120,000", "image": "https://res.cloudinary.com/j0r4ymhm/image/upload/sample2.jpg"}
     ]
   }
 ]
