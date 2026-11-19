@@ -1,4 +1,4 @@
-import os, json, requests, time, hashlib
+import os, json, requests, time, hashlib, re
 from flask import Flask, request, jsonify, render_template_string, session, redirect
 
 app = Flask(__name__)
@@ -42,16 +42,13 @@ def send_image(phone_id, to, image_url, caption):
     print("SEND IMAGE:", r.text)
     return r
 
-# --- NEW: WhatsApp -> Cloudinary Auto Upload ---
 def upload_to_cloudinary(image_bytes, business_name):
-    """Upload image bytes to Cloudinary, return secure_url or None"""
     if not CLOUDINARY_KEY or not CLOUDINARY_SECRET:
-        print("CLOUDINARY keys missing - skipping upload")
+        print("CLOUDINARY keys missing")
         return None
     try:
         timestamp = int(time.time())
         folder = f"verticum/{business_name.lower().replace(' ','-')}"
-        # Signature for Cloudinary: folder + timestamp + secret
         to_sign = f"folder={folder}&timestamp={timestamp}{CLOUDINARY_SECRET}"
         signature = hashlib.sha1(to_sign.encode()).hexdigest()
         url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD}/image/upload"
@@ -67,25 +64,33 @@ def upload_to_cloudinary(image_bytes, business_name):
         return None
 
 def download_whatsapp_media_and_upload(media_id, business_name):
-    """1. Get WhatsApp media URL, 2. Download bytes, 3. Upload to Cloudinary"""
     try:
-        # Step 1: Get download URL
         meta_url = f"https://graph.facebook.com/v21.0/{media_id}"
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         r1 = requests.get(meta_url, headers=headers, timeout=20)
-        print("MEDIA META:", r1.text)
         download_url = r1.json().get("url")
         if not download_url:
             return None
-        # Step 2: Download image bytes
         r2 = requests.get(download_url, headers=headers, timeout=30)
         if r2.status_code != 200:
             return None
-        # Step 3: Upload to Cloudinary
         return upload_to_cloudinary(r2.content, business_name)
     except Exception as e:
         print("DOWNLOAD ERROR:", e)
         return None
+
+def parse_price_text(text):
+    # "Frontal 65k" -> ("Frontal", "₦65k") | "Frontal 65000" -> ("Frontal", "₦65000")
+    text = text.strip()
+    # Find price part: numbers + k / ₦
+    m = re.search(r'(₦?\s*\d[\d,]*\s*k?)', text, re.IGNORECASE)
+    if m:
+        price_raw = m.group(1).replace(" ", "")
+        if "₦" not in price_raw:
+            price_raw = "₦" + price_raw
+        name = text[:m.start()].strip() or "Product"
+        return name, price_raw
+    return text, ""
 
 TEXTS = {
     "choose_lang": "Welcome to {biz}! 👋\nHow do you want me to talk to you?\nReply 1 for English\nReply 2 for Pidgin",
@@ -137,10 +142,12 @@ def handle_onboarding(client, customer_phone, msg):
             state["step"] = 6
             state["data"]["agreed_price"] = "₦50,000 setup + ₦10,000/month"
             state["data"]["pictures"] = []
+            state["data"]["products"] = []  # NEW: paired products
+            state["data"]["pending_image"] = None
             ONBOARDING[customer_phone] = state
             if pg:
-                return "Great! Now send pictures of your products — as many as you sell. Send one by one. When you don finish, type DONE."
-            return "Great! Now send pictures of your products — as many as you sell. Send them one by one. When you are done, type DONE."
+                return "Great! Now send pictures of your products — one by one. After each picture, I go ask you for its name and price. When you don finish, type DONE."
+            return "Great! Now send pictures of your products — one by one. After each picture, I will ask you for its name and price. When you are done, type DONE."
         if low in ["no", "not now", "later"]:
             if pg:
                 return "No wahala. When you ready, just type YES and we go continue. Or type HUMAN to talk to person."
@@ -149,19 +156,36 @@ def handle_onboarding(client, customer_phone, msg):
             return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person."
         return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
     if state["step"] == 6:
+        # If we are waiting for price for last picture
+        if state["data"].get("pending_image"):
+            if low == "done":
+                if pg:
+                    return "You never give me price for last picture. Wetin be name and price for am? e.g. Frontal 65k"
+                return "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
+            name, price = parse_price_text(msg)
+            prod = {"name": name, "price": price, "image": state["data"]["pending_image"]}
+            state["data"]["products"].append(prod)
+            state["data"]["pictures"].append(state["data"]["pending_image"])
+            state["data"]["pending_image"] = None
+            ONBOARDING[customer_phone] = state
+            count = len(state["data"]["products"])
+            if pg:
+                return f"Saved! {name} - {price} + picture {count} don join. Send next picture, or type DONE if you don finish."
+            return f"Saved! {name} - {price} + picture {count} paired. Send next picture, or type DONE if you are done."
+        # No pending image - normal
         if low == "done":
             state["step"] = 7
             ONBOARDING[customer_phone] = state
             clients = load_clients()
-            clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "status": "pending", "onboarding_data": state["data"], "phone_id": "", "products": []})
+            clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "status": "pending", "onboarding_data": state["data"], "phone_id": "", "products": state["data"].get("products", [])})
             save_clients(clients)
-            count = len(state["data"].get("pictures", []))
+            count = len(state["data"].get("products", []))
             if pg:
-                return f"Perfect! We don save {state['data']['business']} + {count} picture(s). Our team go contact you to connect your number and launch your bot. Thank you!"
-            return f"Perfect! We have saved {state['data']['business']} + {count} picture(s). Our team will contact you to connect your number and launch your bot. Thank you!"
+                return f"Perfect! We don save {state['data']['business']} + {count} product(s) with picture + price. Our team go contact you to connect your number and launch your bot. Thank you!"
+            return f"Perfect! We have saved {state['data']['business']} + {count} product(s) with picture + price. Our team will contact you to connect your number and launch your bot. Thank you!"
         if pg:
-            return "Send your product pictures now, one by one. When you don finish, type DONE."
-        return "Send your product pictures now, one by one. When you are done, type DONE."
+            return "Send your product picture now. After you send am, I go ask for its name and price."
+        return "Send your product picture now. After you send it, I will ask for its name and price."
     return "Type HELLO to start again."
 
 def handle_client_bot(client, customer_phone, msg, phone_id):
@@ -218,19 +242,23 @@ def webhook():
             media_id = msg_obj["image"]["id"]
             CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id})
             if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone, {}).get("step") == 6:
+                # Check if already waiting for price
+                if ONBOARDING[customer_phone]["data"].get("pending_image"):
+                    lang = USER_LANG.get(customer_phone, "en")
+                    reply = "You never give me price for last picture yet. Wetin be name and price for am? e.g. Frontal 65k" if lang=="pg" else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
+                    send_text(phone_id, customer_phone, reply)
+                    return "ok", 200
                 biz_name = ONBOARDING[customer_phone]["data"].get("business", "verticum")
-                # NEW: Auto upload to Cloudinary
                 cloud_url = download_whatsapp_media_and_upload(media_id, biz_name)
-                if cloud_url:
-                    ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(cloud_url)
-                else:
-                    ONBOARDING[customer_phone]["data"].setdefault("pictures", []).append(f"media_id:{media_id}")
-                count = len(ONBOARDING[customer_phone]["data"]["pictures"])
+                if not cloud_url:
+                    cloud_url = f"media_id:{media_id}"
+                # Save as pending - wait for price
+                ONBOARDING[customer_phone]["data"]["pending_image"] = cloud_url
                 lang = USER_LANG.get(customer_phone, "en")
                 if lang == "pg":
-                    reply = f"Picture {count} saved to Cloudinary! Send another one, or type DONE if you don finish."
+                    reply = "Picture saved to Cloudinary! Wetin be name and price for this picture? e.g. Frontal 65k"
                 else:
-                    reply = f"Picture {count} saved to Cloudinary! Send another one, or type DONE if you are done."
+                    reply = "Picture saved to Cloudinary! What is the name and price for this picture? e.g. Frontal 65k"
                 send_text(phone_id, customer_phone, reply)
                 CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
             else:
@@ -277,6 +305,7 @@ DASHBOARD_HTML = """
 {% for c in clients %}
   <div style='border:1px solid #ccc;padding:10px;margin:10px'>
     <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - Status: {{c.get('status','pending')}} - PhoneID: {{c.phone_id}}<br>
+    Products: {{c.get('products', [])}}<br>
     <a href='/dashboard/client/{{c.id}}'>View Chats</a> |
     {% if c.active %}
       <a href='/dashboard/deactivate/{{c.id}}'>Deactivate</a> |
