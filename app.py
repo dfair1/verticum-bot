@@ -99,28 +99,24 @@ def handle_onboarding(client, customer_phone, msg):
         return "Wetin you dey sell? (e.g. Wigs, Food, Clothes) Or wetin be your service? (e.g. Makeup, Hair Braiding, Cleaning)" if pg else "What do you sell? (e.g. Wigs, Food, Clothes) Or what is your service? (e.g. Makeup, Hair Braiding, Cleaning)"
     if state["step"] == 2:
         state["data"]["products_text"] = msg; state["step"]=3; ONBOARDING[customer_phone]=state
-        return "How much be your prices? (e.g. Frontal ₦85k, Makeup ₦30k)" if pg else "What are your prices? (e.g. Frontal ₦85k, Makeup ₦30k)"
-    if state["step"] == 3:
-        state["data"]["prices"]=msg; state["step"]=4; ONBOARDING[customer_phone]=state
         return "Where you dey / You dey deliver?" if pg else "Where are you located / Do you deliver?"
-    if state["step"] == 4:
-        state["data"]["location"]=msg; state["step"]=5; ONBOARDING[customer_phone]=state
+    if state["step"] == 3:
+        state["data"]["location"]=msg; state["step"]=4; ONBOARDING[customer_phone]=state
         biz = state["data"].get("business","your business")
         if pg: return f"Thank you for {biz}! We fit set up your own Auto WhatsApp like this one for ₦50,000 one-time setup + ₦10,000/month. E go answer PRICE, PICTURES and HUMAN for you, for English and Pidgin, 24/7.\n\nYou want make we proceed? Reply YES"
         return f"Thank you for {biz}! We can set up your own Auto WhatsApp like this one for ₦50,000 one-time setup + ₦10,000/month. It will answer PRICE, PICTURES and HUMAN for you, in English and Pidgin, 24/7.\n\nDo you want us to proceed? Reply YES"
-    if state["step"] == 5:
+    if state["step"] == 4:
         if low in ["yes","y","yes please","proceed","ok","okay"]:
-            state["step"]=6; state["data"]["agreed_price"]="₦50,000 setup + ₦10,000/month"; state["data"]["pictures"]=[]; state["data"]["products"]=[]; state["data"]["pending_image"]=None; ONBOARDING[customer_phone]=state
+            state["step"]=5; state["data"]["agreed_price"]="₦50,000 setup + ₦10,000/month"; state["data"]["pictures"]=[]; state["data"]["products"]=[]; state["data"]["pending_image"]=None; ONBOARDING[customer_phone]=state
             return "Great! Now send pictures of your products — one by one. After each picture, I go ask you for its name and price. When you don finish, type DONE. If you offer SERVICES and you no get pictures, type SKIP." if pg else "Great! Now send pictures of your products — one by one. After each picture, I will ask you for its name and price. When you are done, type DONE. If you offer SERVICES and have no pictures, type SKIP."
         return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person." if pg else "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
-    if state["step"] == 6:
-        # SKIP for service businesses with no pictures
+    if state["step"] == 5:
         if low in ["skip", "no pictures", "no picture", "i have no pictures", "services", "service", "no pics"]:
-            state["step"] = 6.5
+            state["step"] = 5.5
             ONBOARDING[customer_phone] = state
             if pg:
-                return "No wahala! Type your services one by one like this:\n\nHair Braiding 20k\n\nSend one by one. When you don finish, type DONE. If you no get services too, just type DONE again."
-            return "No problem! Type your services one by one like this:\n\nHair Braiding 20k\n\nSend one by one. When you are done, type DONE. If you have no services either, just type DONE again."
+                return "No wahala! Type your services one by one like this:\n\nAdult Hair Cut 3k\n\nSend one by one. When you don finish, type DONE."
+            return "No problem! Type your services one by one like this:\n\nAdult Hair Cut 3k\n\nSend one by one. When you are done, type DONE."
         if state["data"].get("pending_image"):
             if low=="done": return "You never give me price for last picture. Wetin be name and price for am? e.g. Frontal 65k" if pg else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
             name, price = parse_price_text(msg)
@@ -129,14 +125,13 @@ def handle_onboarding(client, customer_phone, msg):
             count=len(state["data"]["products"])
             return f"Saved! {name} - {price} + picture {count} don join. Send next picture, or type DONE if you don finish." if pg else f"Saved! {name} - {price} + picture {count} paired. Send next picture, or type DONE if you are done."
         if low=="done":
-            state["step"]=7; state["data"]["faqs"]=[]; ONBOARDING[customer_phone]=state
+            state["step"]=6; state["data"]["faqs"]=[]; ONBOARDING[customer_phone]=state
             if pg: return "Products don finish! Now, wetin customers dey always ask you? Type question + answer like this:\n\nQ: Do you deliver to Lagos?\nA: Yes, we deliver to Lagos for ₦3,000\n\nSend one by one. When you don finish, type DONE."
             return "Products done! Now, what do customers always ask you? Type question + answer like this:\n\nQ: Do you deliver to Lagos?\nA: Yes, we deliver to Lagos for ₦3,000\n\nSend one by one. When you are done, type DONE."
         return "Send your product picture now. After you send am, I go ask for its name and price. If you offer SERVICES and you no get pictures, type SKIP." if pg else "Send your product picture now. After you send it, I will ask for its name and price. If you offer SERVICES and have no pictures, type SKIP."
-    if state["step"] == 6.5:
-        # Service text-only mode
+    if state["step"] == 5.5:
         if low=="done":
-            state["step"]=7; state["data"]["faqs"]=[]; ONBOARDING[customer_phone]=state
+            state["step"]=6; state["data"]["faqs"]=[]; ONBOARDING[customer_phone]=state
             if pg: return "Services don finish! Now, wetin customers dey always ask you? Type question + answer like this:\n\nQ: Do you deliver to Lagos?\nA: Yes, we deliver to Lagos for ₦3,000\n\nSend one by one. When you don finish, type DONE."
             return "Services done! Now, what do customers always ask you? Type question + answer like this:\n\nQ: Do you deliver to Lagos?\nA: Yes, we deliver to Lagos for ₦3,000\n\nSend one by one. When you are done, type DONE."
         name, price = parse_price_text(msg)
@@ -145,9 +140,9 @@ def handle_onboarding(client, customer_phone, msg):
         ONBOARDING[customer_phone]=state
         count=len(state["data"]["products"])
         return f"Saved service! {name} - {price}. Send next service, or type DONE if you don finish." if pg else f"Saved service! {name} - {price}. Send next service, or type DONE if you are done."
-    if state["step"] == 7:
+    if state["step"] == 6:
         if low=="done":
-            state["step"]=8; ONBOARDING[customer_phone]=state
+            state["step"]=7; ONBOARDING[customer_phone]=state
             clients=load_clients()
             clients.append({"id": state["data"]["business"].lower().replace(" ","").replace(".",""), "business": state["data"]["business"], "mode":"client", "active":False, "status":"pending", "onboarding_data": state["data"], "phone_id":"", "products": state["data"].get("products",[]), "faqs": state["data"].get("faqs",[])})
             save_clients(clients)
@@ -168,7 +163,6 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
     lang = USER_LANG.get(customer_phone, "en")
     low = msg.lower().strip()
     biz = client["business"]
-    # Check FAQs FIRST
     for faq in client.get("faqs", []):
         q = faq.get("q","").lower()
         keywords = [w for w in re.findall(r'\w+', q) if len(w)>3]
@@ -233,7 +227,7 @@ def webhook():
         if msg_obj.get("type")=="image":
             media_id=msg_obj["image"]["id"]
             CHATS[client["id"]][customer_phone].append({"from":"customer","type":"image","media_id":media_id})
-            if client.get("mode")=="onboarding" and ONBOARDING.get(customer_phone,{}).get("step")==6:
+            if client.get("mode")=="onboarding" and ONBOARDING.get(customer_phone,{}).get("step")==5:
                 if ONBOARDING[customer_phone]["data"].get("pending_image"):
                     lang=USER_LANG.get(customer_phone,"en")
                     reply="You never give me price for last picture yet. Wetin be name and price for am? e.g. Frontal 65k" if lang=="pg" else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
