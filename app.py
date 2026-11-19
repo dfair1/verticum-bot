@@ -26,12 +26,13 @@ USER_LANG = {}
 ONBOARDING = {}
 TAKEOVER = set()
 
+# --- SEND FUNCTIONS: Use phone_id of the client that received the message ---
 def send_text(phone_id, to, text):
     url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
     r = requests.post(url, headers=headers, json=payload)
-    print("SEND TEXT:", r.text)
+    print(f"SEND TEXT via {phone_id}:", r.text)
     return r
 
 def send_image(phone_id, to, image_url, caption):
@@ -39,12 +40,11 @@ def send_image(phone_id, to, image_url, caption):
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "image", "image": {"link": image_url, "caption": caption}}
     r = requests.post(url, headers=headers, json=payload)
-    print("SEND IMAGE:", r.text)
+    print(f"SEND IMAGE via {phone_id}:", r.text)
     return r
 
 def upload_to_cloudinary(image_bytes, business_name):
     if not CLOUDINARY_KEY or not CLOUDINARY_SECRET:
-        print("CLOUDINARY keys missing")
         return None
     try:
         timestamp = int(time.time())
@@ -55,7 +55,6 @@ def upload_to_cloudinary(image_bytes, business_name):
         files = {"file": ("product.jpg", image_bytes, "image/jpeg")}
         data = {"api_key": CLOUDINARY_KEY, "timestamp": timestamp, "folder": folder, "signature": signature}
         r = requests.post(url, files=files, data=data, timeout=30)
-        print("CLOUDINARY:", r.text[:500])
         if r.status_code == 200:
             return r.json().get("secure_url")
         return None
@@ -80,9 +79,7 @@ def download_whatsapp_media_and_upload(media_id, business_name):
         return None
 
 def parse_price_text(text):
-    # "Frontal 65k" -> ("Frontal", "₦65k") | "Frontal 65000" -> ("Frontal", "₦65000")
     text = text.strip()
-    # Find price part: numbers + k / ₦
     m = re.search(r'(₦?\s*\d[\d,]*\s*k?)', text, re.IGNORECASE)
     if m:
         price_raw = m.group(1).replace(" ", "")
@@ -111,24 +108,22 @@ def handle_onboarding(client, customer_phone, msg):
     pg = (lang == "pg")
     if state["step"] == 0:
         ONBOARDING[customer_phone] = {"step": 1, "data": {}}
-        if pg:
-            return "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
-        return "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
+        return "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?" if pg else "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
     if state["step"] == 1:
         state["data"]["business"] = msg
         state["step"] = 2
         ONBOARDING[customer_phone] = state
-        return "What do you sell? (e.g. Wigs, Food, Clothes)" if not pg else "Wetin you dey sell? (e.g. Wigs, Food, Clothes)"
+        return "Wetin you dey sell? (e.g. Wigs, Food, Clothes)" if pg else "What do you sell? (e.g. Wigs, Food, Clothes)"
     if state["step"] == 2:
         state["data"]["products_text"] = msg
         state["step"] = 3
         ONBOARDING[customer_phone] = state
-        return "What are your prices? (e.g. Frontal ₦85k)" if not pg else "How much be your prices? (e.g. Frontal ₦85k)"
+        return "How much be your prices? (e.g. Frontal ₦85k)" if pg else "What are your prices? (e.g. Frontal ₦85k)"
     if state["step"] == 3:
         state["data"]["prices"] = msg
         state["step"] = 4
         ONBOARDING[customer_phone] = state
-        return "Where are you located / Do you deliver?" if not pg else "Where you dey / You dey deliver?"
+        return "Where you dey / You dey deliver?" if pg else "Where are you located / Do you deliver?"
     if state["step"] == 4:
         state["data"]["location"] = msg
         state["step"] = 5
@@ -142,26 +137,19 @@ def handle_onboarding(client, customer_phone, msg):
             state["step"] = 6
             state["data"]["agreed_price"] = "₦50,000 setup + ₦10,000/month"
             state["data"]["pictures"] = []
-            state["data"]["products"] = []  # NEW: paired products
+            state["data"]["products"] = []
             state["data"]["pending_image"] = None
             ONBOARDING[customer_phone] = state
             if pg:
                 return "Great! Now send pictures of your products — one by one. After each picture, I go ask you for its name and price. When you don finish, type DONE."
             return "Great! Now send pictures of your products — one by one. After each picture, I will ask you for its name and price. When you are done, type DONE."
         if low in ["no", "not now", "later"]:
-            if pg:
-                return "No wahala. When you ready, just type YES and we go continue. Or type HUMAN to talk to person."
-            return "No problem. When you are ready, just type YES and we will continue. Or type HUMAN to talk to a person."
-        if pg:
-            return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person."
-        return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
+            return "No wahala. When you ready, just type YES and we go continue. Or type HUMAN to talk to person." if pg else "No problem. When you are ready, just type YES and we will continue. Or type HUMAN to talk to a person."
+        return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person." if pg else "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
     if state["step"] == 6:
-        # If we are waiting for price for last picture
         if state["data"].get("pending_image"):
             if low == "done":
-                if pg:
-                    return "You never give me price for last picture. Wetin be name and price for am? e.g. Frontal 65k"
-                return "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
+                return "You never give me price for last picture. Wetin be name and price for am? e.g. Frontal 65k" if pg else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
             name, price = parse_price_text(msg)
             prod = {"name": name, "price": price, "image": state["data"]["pending_image"]}
             state["data"]["products"].append(prod)
@@ -169,10 +157,7 @@ def handle_onboarding(client, customer_phone, msg):
             state["data"]["pending_image"] = None
             ONBOARDING[customer_phone] = state
             count = len(state["data"]["products"])
-            if pg:
-                return f"Saved! {name} - {price} + picture {count} don join. Send next picture, or type DONE if you don finish."
-            return f"Saved! {name} - {price} + picture {count} paired. Send next picture, or type DONE if you are done."
-        # No pending image - normal
+            return f"Saved! {name} - {price} + picture {count} don join. Send next picture, or type DONE if you don finish." if pg else f"Saved! {name} - {price} + picture {count} paired. Send next picture, or type DONE if you are done."
         if low == "done":
             state["step"] = 7
             ONBOARDING[customer_phone] = state
@@ -180,12 +165,8 @@ def handle_onboarding(client, customer_phone, msg):
             clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "status": "pending", "onboarding_data": state["data"], "phone_id": "", "products": state["data"].get("products", [])})
             save_clients(clients)
             count = len(state["data"].get("products", []))
-            if pg:
-                return f"Perfect! We don save {state['data']['business']} + {count} product(s) with picture + price. Our team go contact you to connect your number and launch your bot. Thank you!"
-            return f"Perfect! We have saved {state['data']['business']} + {count} product(s) with picture + price. Our team will contact you to connect your number and launch your bot. Thank you!"
-        if pg:
-            return "Send your product picture now. After you send am, I go ask for its name and price."
-        return "Send your product picture now. After you send it, I will ask for its name and price."
+            return f"Perfect! We don save {state['data']['business']} + {count} product(s) with picture + price. Our team go contact you to connect your number and launch your bot. Thank you!" if pg else f"Perfect! We have saved {state['data']['business']} + {count} product(s) with picture + price. Our team will contact you to connect your number and launch your bot. Thank you!"
+        return "Send your product picture now. After you send am, I go ask for its name and price." if pg else "Send your product picture now. After you send it, I will ask for its name and price."
     return "Type HELLO to start again."
 
 def handle_client_bot(client, customer_phone, msg, phone_id):
@@ -196,6 +177,8 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
         lines = []
         for p in client.get("products", []):
             lines.append(f"{p['name']} - {p['price']}")
+        if not lines:
+            return "Our prices go soon dey here. Type HUMAN to talk to person." if lang=="pg" else "Our prices will be here soon. Type HUMAN to talk to a person."
         if lang=="pg":
             return "Our prices be:\n" + "\n".join(lines) + "\nType PICTURES to see dem."
         return "Our prices are:\n" + "\n".join(lines) + "\nType PICTURES to see them."
@@ -208,14 +191,10 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
         return "I have sent the pictures above. Which one would you like?"
     if low in ["human", "person", "agent", "talk to person"]:
         TAKEOVER.add((client["id"], customer_phone))
-        return "A human will reply you shortly. Please wait." if lang=="en" else "Person go reply you soon. Abeg wait small."
+        return "Person go reply you soon. Abeg wait small." if lang=="pg" else "A human will reply you shortly. Please wait."
     if low in ["hello", "hi", "hey"]:
-        if lang=="pg":
-            return client.get("greeting_pg", f"Hello, welcome to {biz}!")
-        return client.get("greeting_en", f"Hello, welcome to {biz}!")
-    if lang=="pg":
-        return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person."
-    return "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
+        return client.get("greeting_pg", f"Hello, welcome to {biz}!") if lang=="pg" else client.get("greeting_en", f"Hello, welcome to {biz}!")
+    return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person." if lang=="pg" else "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -234,15 +213,19 @@ def webhook():
         msg_obj = entry["messages"][0]
         customer_phone = msg_obj["from"]
         phone_id = entry["metadata"]["phone_number_id"]
+        # KEY: Find client by Phone ID - this allows Verticum + Sandra live together
         client = get_client_by_phone_id(phone_id)
-        if not client or not client.get("active", True):
+        if not client:
+            print(f"No client found for phone_id {phone_id}")
+            return "ok", 200
+        if not client.get("active", True):
+            print(f"Client {client['business']} is inactive")
             return "ok", 200
         CHATS.setdefault(client["id"], {}).setdefault(customer_phone, [])
         if msg_obj.get("type") == "image":
             media_id = msg_obj["image"]["id"]
             CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id})
             if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone, {}).get("step") == 6:
-                # Check if already waiting for price
                 if ONBOARDING[customer_phone]["data"].get("pending_image"):
                     lang = USER_LANG.get(customer_phone, "en")
                     reply = "You never give me price for last picture yet. Wetin be name and price for am? e.g. Frontal 65k" if lang=="pg" else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
@@ -252,13 +235,9 @@ def webhook():
                 cloud_url = download_whatsapp_media_and_upload(media_id, biz_name)
                 if not cloud_url:
                     cloud_url = f"media_id:{media_id}"
-                # Save as pending - wait for price
                 ONBOARDING[customer_phone]["data"]["pending_image"] = cloud_url
                 lang = USER_LANG.get(customer_phone, "en")
-                if lang == "pg":
-                    reply = "Picture saved to Cloudinary! Wetin be name and price for this picture? e.g. Frontal 65k"
-                else:
-                    reply = "Picture saved to Cloudinary! What is the name and price for this picture? e.g. Frontal 65k"
+                reply = "Picture saved to Cloudinary! Wetin be name and price for this picture? e.g. Frontal 65k" if lang=="pg" else "Picture saved to Cloudinary! What is the name and price for this picture? e.g. Frontal 65k"
                 send_text(phone_id, customer_phone, reply)
                 CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
             else:
@@ -298,14 +277,20 @@ def webhook():
         print("ERROR:", e)
     return "ok", 200
 
+# --- DASHBOARD WITH PHONE ID EDIT ---
 DASHBOARD_HTML = """
 <h2>Verticum Dashboard</h2>
 <p><a href='/dashboard/add-client'>+ Add New Client</a></p>
-<h3>All Clients</h3>
+<h3>All Clients - Each client = One Phone ID = One WhatsApp Number</h3>
 {% for c in clients %}
-  <div style='border:1px solid #ccc;padding:10px;margin:10px'>
-    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - Status: {{c.get('status','pending')}} - PhoneID: {{c.phone_id}}<br>
-    Products: {{c.get('products', [])}}<br>
+  <div style='border:1px solid #ccc;padding:12px;margin:10px'>
+    <b>{{c.business}}</b> - Mode: {{c.mode}} - Active: {{c.active}} - Status: {{c.get('status','pending')}}<br>
+    <b>Phone ID:</b> {{c.phone_id or '(Not set yet - add Sandra number here)'}}<br>
+    <form method='POST' action='/dashboard/update-phone/{{c.id}}' style='margin:6px 0'>
+      Update Phone ID: <input name='phone_id' value='{{c.phone_id}}' style='width:250px' placeholder='Paste Phone ID from Meta'>
+      <button>Save Phone ID</button>
+    </form>
+    Products: {{c.get('products', [])}}<br><br>
     <a href='/dashboard/client/{{c.id}}'>View Chats</a> |
     {% if c.active %}
       <a href='/dashboard/deactivate/{{c.id}}'>Deactivate</a> |
@@ -320,6 +305,15 @@ DASHBOARD_HTML = """
 @app.route("/dashboard")
 def dashboard():
     return render_template_string(DASHBOARD_HTML, clients=load_clients())
+
+@app.route("/dashboard/update-phone/<client_id>", methods=["POST"])
+def update_phone(client_id):
+    clients = load_clients()
+    for c in clients:
+        if c.get("id") == client_id:
+            c["phone_id"] = request.form["phone_id"].strip()
+    save_clients(clients)
+    return redirect("/dashboard")
 
 @app.route("/dashboard/client/<client_id>")
 def client_chats(client_id):
