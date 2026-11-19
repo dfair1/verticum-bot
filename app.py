@@ -20,12 +20,10 @@ def save_clients(clients):
     with open("clients.json", "w") as f:
         json.dump(clients, f, indent=2)
 
-# In-memory store for demo: chats, language, onboarding state, takeover
-# For production, move this to SQLite / Postgres
-CHATS = {}  # {client_id: {customer_phone: [messages]}}
-USER_LANG = {}  # {customer_phone: "en" or "pg"}
-ONBOARDING = {} # {customer_phone: {step, data}}
-TAKEOVER = set() # set of (client_id, customer_phone) where human took over
+CHATS = {}
+USER_LANG = {}
+ONBOARDING = {}
+TAKEOVER = set()
 
 # --- WhatsApp Helpers ---
 def send_text(phone_id, to, text):
@@ -64,38 +62,67 @@ def get_client_by_phone_id(phone_id):
 def handle_onboarding(client, customer_phone, msg):
     state = ONBOARDING.get(customer_phone, {"step": 0, "data": {}})
     lang = USER_LANG.get(customer_phone, "en")
-    # Step 0 = ask business name
+    low = msg.lower().strip()
+    pg = (lang == "pg")
+
     if state["step"] == 0:
         ONBOARDING[customer_phone] = {"step": 1, "data": {}}
-        if lang == "pg":
+        if pg:
             return "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
         return "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
     if state["step"] == 1:
         state["data"]["business"] = msg
         state["step"] = 2
         ONBOARDING[customer_phone] = state
-        return "What do you sell? (e.g. Wigs, Food, Clothes)" if lang=="en" else "Wetin you dey sell? (e.g. Wigs, Food, Clothes)"
+        return "What do you sell? (e.g. Wigs, Food, Clothes)" if not pg else "Wetin you dey sell? (e.g. Wigs, Food, Clothes)"
     if state["step"] == 2:
         state["data"]["products_text"] = msg
         state["step"] = 3
         ONBOARDING[customer_phone] = state
-        return "What are your prices? (e.g. Frontal ₦85k)" if lang=="en" else "How much be your prices? (e.g. Frontal ₦85k)"
+        return "What are your prices? (e.g. Frontal ₦85k)" if not pg else "How much be your prices? (e.g. Frontal ₦85k)"
     if state["step"] == 3:
         state["data"]["prices"] = msg
         state["step"] = 4
         ONBOARDING[customer_phone] = state
-        return "Where are you located / Do you deliver?" if lang=="en" else "Where you dey / You dey deliver?"
+        return "Where are you located / Do you deliver?" if not pg else "Where you dey / You dey deliver?"
     if state["step"] == 4:
         state["data"]["location"] = msg
         state["step"] = 5
         ONBOARDING[customer_phone] = state
-        # Save as pending client
-        clients = load_clients()
-        clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "onboarding_data": state["data"], "phone_id": "", "products": []})
-        save_clients(clients)
-        if lang=="pg":
-            return f"Thank you! We don save {state['data']['business']}. Our team go contact you to connect your number and add your product pictures for Cloudinary."
-        return f"Thank you! We have saved {state['data']['business']}. Our team will contact you to connect your number and add your product pictures on Cloudinary."
+        biz = state["data"].get("business", "your business")
+        if pg:
+            return f"Thank you for {biz}! We fit set up your own Auto WhatsApp like this one for ₦50,000 one-time setup + ₦10,000/month. E go answer PRICE, PICTURES and HUMAN for you, for English and Pidgin, 24/7.\n\nYou want make we proceed? Reply YES"
+        return f"Thank you for {biz}! We can set up your own Auto WhatsApp like this one for ₦50,000 one-time setup + ₦10,000/month. It will answer PRICE, PICTURES and HUMAN for you, in English and Pidgin, 24/7.\n\nDo you want us to proceed? Reply YES"
+    if state["step"] == 5:
+        if low in ["yes", "y", "yes please", "proceed", "ok", "okay"]:
+            state["step"] = 6
+            state["data"]["agreed_price"] = "₦50,000 setup + ₦10,000/month"
+            state["data"]["pictures"] = []
+            ONBOARDING[customer_phone] = state
+            if pg:
+                return "Great! Now send pictures of your products — as many as you sell. Send one by one. When you don finish, type DONE."
+            return "Great! Now send pictures of your products — as many as you sell. Send them one by one. When you are done, type DONE."
+        if low in ["no", "not now", "later"]:
+            if pg:
+                return "No wahala. When you ready, just type YES and we go continue. Or type HUMAN to talk to person."
+            return "No problem. When you are ready, just type YES and we will continue. Or type HUMAN to talk to a person."
+        if pg:
+            return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person."
+        return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
+    if state["step"] == 6:
+        if low == "done":
+            state["step"] = 7
+            ONBOARDING[customer_phone] = state
+            clients = load_clients()
+            clients.append({"id": state["data"]["business"].lower().replace(" ",""), "business": state["data"]["business"], "mode": "client", "active": False, "onboarding_data": state["data"], "phone_id": "", "products": []})
+            save_clients(clients)
+            count = len(state["data"].get("pictures", []))
+            if pg:
+                return f"Perfect! We don save {state['data']['business']} + {count} picture(s). Our team go contact you to connect your number and launch your bot. Thank you!"
+            return f"Perfect! We have saved {state['data']['business']} + {count} picture(s). Our team will contact you to connect your number and launch your bot. Thank you!"
+        if pg:
+            return "Send your product pictures now, one by one. When you don finish, type DONE."
+        return "Send your product pictures now, one by one. When you are done, type DONE."
     return "Type HELLO to start again."
 
 # --- Client Bot Logic ---
@@ -112,7 +139,6 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
             return "Our prices be:\n" + "\n".join(lines) + "\nType PICTURES to see dem."
         return "Our prices are:\n" + "\n".join(lines) + "\nType PICTURES to see them."
     if low in ["pictures", "picture", "send pictures", "show me pictures", "images"]:
-        # Send images via Cloudinary links
         for p in client.get("products", []):
             if p.get("image"):
                 send_image(phone_id, customer_phone, p["image"], f"{p['name']} - {p['price']}")
@@ -126,7 +152,6 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
         if lang=="pg":
             return client.get("greeting_pg", f"Hello, welcome to {biz}!")
         return client.get("greeting_en", f"Hello, welcome to {biz}!")
-    # Default
     if lang=="pg":
         return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person."
     return "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
@@ -153,120 +178,10 @@ def webhook():
         if not client or not client.get("active", True):
             return "ok", 200
 
-        # Save chat
         CHATS.setdefault(client["id"], {}).setdefault(customer_phone, [])
-        # Handle image from customer -> save to Cloudinary (placeholder: log media id)
+        # Handle image from customer
         if msg_obj.get("type") == "image":
             media_id = msg_obj["image"]["id"]
-            CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id, "note": "Saved to Cloudinary - download via Graph API then upload"})
-            # TODO: Download via https://graph.facebook.com/v21.0/{media_id} then upload to Cloudinary
-            send_text(phone_id, customer_phone, "Thank you, we have received your picture. Our team will check it." )
-            return "ok", 200
-
-        msg_text = msg_obj.get("text", {}).get("body", "")
-        CHATS[client["id"]][customer_phone].append({"from": "customer", "text": msg_text})
-
-        # Takeover check
-        if (client["id"], customer_phone) in TAKEOVER:
-            return "ok", 200
-
-        # Language selection - first time
-        if customer_phone not in USER_LANG:
-            if msg_text.strip() == "1":
-                USER_LANG[customer_phone] = "en"
-                if client.get("mode") == "onboarding":
-                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
-                    reply = "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
-                else:
-                    reply = TEXTS["greeting_en"].format(biz=client["business"])
-            elif msg_text.strip() == "2":
-                USER_LANG[customer_phone] = "pg"
-                if client.get("mode") == "onboarding":
-                    ONBOARDING[customer_phone] = {"step": 1, "data": {}}
-                    reply = "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
-                else:
-                    reply = TEXTS["greeting_pg"].format(biz=client["business"])
-            else:
-                reply = TEXTS["choose_lang"].format(biz=client["business"])
-            send_text(phone_id, customer_phone, reply)
-            CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
-            return "ok", 200
-
-        # Route
-        if client.get("mode") == "onboarding":
-            reply = handle_onboarding(client, customer_phone, msg_text)
-        else:
-            reply = handle_client_bot(client, customer_phone, msg_text, phone_id)
-
-        send_text(phone_id, customer_phone, reply)
-        CHATS[client["id"]][customer_phone].append({"from": "bot", "text": reply})
-    except Exception as e:
-        print("ERROR:", e)
-    return "ok", 200
-
-# --- Dashboard ---
-DASHBOARD_HTML = """
-<h2>Verticum Dashboard</h2>
-<p><a href='/dashboard/add-client'>+ Add New Client</a></p>
-<h3>All Clients</h3>
-{% for c in clients %}
-  <div style='border:1px solid #ccc;padding:10px;margin:10px'>
-    <b>{{c.business}}</b> - {{c.mode}} - Active: {{c.active}} - PhoneID: {{c.phone_id}}<br>
-    <a href='/dashboard/client/{{c.id}}'>View Chats</a>
-  </div>
-{% endfor %}
-<h3>Chats</h3>
-<p>Click a client to see chats, Take Over / Give Back, and reply.</p>
-"""
-
-@app.route("/dashboard")
-def dashboard():
-    # Simple admin check - for now open, add login later
-    return render_template_string(DASHBOARD_HTML, clients=load_clients())
-
-@app.route("/dashboard/client/<client_id>")
-def client_chats(client_id):
-    chats = CHATS.get(client_id, {})
-    html = f"<h2>{client_id} Chats</h2><a href='/dashboard'>Back</a><br><br>"
-    for phone, msgs in chats.items():
-        html += f"<h3>{phone} <a href='/dashboard/takeover/{client_id}/{phone}'>Take Over</a> | <a href='/dashboard/giveback/{client_id}/{phone}'>Give Back to Bot</a></h3>"
-        for m in msgs:
-            html += f"<p>{m}</p>"
-    return html
-
-@app.route("/dashboard/takeover/<client_id>/<phone>")
-def takeover(client_id, phone):
-    TAKEOVER.add((client_id, phone))
-    return f"Taken over {phone}. Bot paused. <a href='/dashboard'>Back</a>"
-
-@app.route("/dashboard/giveback/<client_id>/<phone>")
-def giveback(client_id, phone):
-    TAKEOVER.discard((client_id, phone))
-    return f"Gave back {phone} to bot. <a href='/dashboard'>Back</a>"
-
-@app.route("/dashboard/add-client", methods=["GET","POST"])
-def add_client():
-    if request.method=="POST":
-        clients = load_clients()
-        new = {"id": request.form["business"].lower().replace(" ",""), "business": request.form["business"], "phone_id": request.form["phone_id"], "mode": "client", "active": True, "products": [{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}]}
-        clients.append(new)
-        save_clients(clients)
-        return redirect("/dashboard")
-    return """
-    <h2>Add New Client - Fast Way (No GitHub needed)</h2>
-    <form method='POST'>
-      Business Name: <input name='business'><br>
-      Phone ID (from Meta): <input name='phone_id'><br>
-      Product Name: <input name='product_name'><br>
-      Price: <input name='price'><br>
-      Cloudinary Image Link: <input name='image' placeholder='https://res.cloudinary.com/...'><br>
-      <button>Add Client</button>
-    </form>
-    """
-
-@app.route("/")
-def home():
-    return "Verticum Bot is Live"
-
-if __name__ == "__main__":
-    app.run(port=5000)
+            CHATS[client["id"]][customer_phone].append({"from": "customer", "type": "image", "media_id": media_id})
+            # If in onboarding picture step, save it
+            if client.get("mode") == "onboarding" and ONBOARDING.get(customer_phone,
