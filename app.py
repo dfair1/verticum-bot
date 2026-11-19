@@ -1,5 +1,5 @@
 import os, json, requests, time, hashlib, re
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 from functools import wraps
 
 app = Flask(__name__)
@@ -10,7 +10,6 @@ CLOUDINARY_CLOUD = os.environ.get("CLOUDINARY_CLOUD_NAME", "demo")
 CLOUDINARY_KEY = os.environ.get("CLOUDINARY_API_KEY", "")
 CLOUDINARY_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "")
 OWNER_PHONE = os.environ.get("OWNER_PHONE", "2348039113437")
-# ADMIN LOGIN - Change in Render Env Vars: ADMIN_USER, ADMIN_PASS
 ADMIN_USER = os.environ.get("ADMIN_USER", "verticum")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "verticum123")
 
@@ -20,7 +19,6 @@ def load_clients():
     except: return []
 def save_clients(clients):
     with open("clients.json", "w") as f: json.dump(clients, f, indent=2)
-
 def load_chats():
     try:
         with open("chats.json") as f: return json.load(f)
@@ -32,6 +30,8 @@ CHATS = load_chats()
 USER_LANG = {}
 ONBOARDING = {}
 TAKEOVER = set()
+SEEN_PRODUCTS = set()
+HUMAN_ATTEMPT_ONBOARDING = {}
 
 def add_chat(client_id, customer_phone, msg_obj):
     if client_id not in CHATS: CHATS[client_id] = {}
@@ -100,9 +100,9 @@ def normalize_phone(raw):
     return p
 
 TEXTS = {
-    "choose_lang": "Welcome to {biz}! 👋\nHow do you want me to talk to you?\nReply 1 for English\nReply 2 for Pidgin\n\nType HUMAN anytime to talk to a person.",
-    "greeting_en": "Hello, welcome to {biz}! How can we help you today? Type PRICE for prices, PICTURES to see products, or HUMAN to talk to a person.",
-    "greeting_pg": "Hello my customer, welcome to {biz}! How we fit help you today? Type PRICE for price, PICTURES to see products, or HUMAN to talk to person.",
+    "choose_lang": "Welcome to {biz}! 👋\nHow do you want me to talk to you?\nReply 1 for English\nReply 2 for Pidgin",
+    "greeting_en": "Hello, welcome to {biz}! Type PRICE to see prices, PICTURES to see products.",
+    "greeting_pg": "Hello my customer, welcome to {biz}! Type PRICE for price, PICTURES to see products.",
 }
 
 def get_client_by_phone_id(phone_id):
@@ -122,49 +122,38 @@ def send_owner_alert(phone_id, client, customer_phone, customer_msg):
     try:
         biz = client.get("business", "Unknown")
         target = get_owner_phone_for_client(client)
-        alert = f"🔔 HUMAN ALERT - {biz}\n\nCustomer: {customer_phone}\nWants to talk to a human.\nLast message: {customer_msg}\n\nBot don pause for this customer. Go to Dashboard to reply, or reply am here for WhatsApp.\nTo give back to bot, go Dashboard > Give Back to Bot."
+        alert = f"🔔 HUMAN ALERT - {biz}\n\nCustomer: {customer_phone}\nWants to talk to a human.\nLast message: {customer_msg}\n\nBot has paused for this customer. Go to Dashboard to reply, or reply here on WhatsApp.\nTo give back to bot, go Dashboard > Give Back to Bot."
         send_text(phone_id, target, alert)
         print(f"Owner alert sent to {target} for {biz}")
     except Exception as e:
         print("OWNER ALERT ERROR:", e)
 
-# ============ LOGIN HELPERS ============
-def is_admin():
-    return session.get("user_type")=="admin"
-def is_client():
-    return session.get("user_type")=="client"
-def current_client_id():
-    return session.get("client_id")
-
+def is_admin(): return session.get("user_type")=="admin"
+def is_client(): return session.get("user_type")=="client"
+def current_client_id(): return session.get("client_id")
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if "user_type" not in session:
-            return redirect("/dashboard/login")
+        if "user_type" not in session: return redirect("/dashboard/login")
         return f(*args, **kwargs)
     return decorated
-
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get("user_type")!="admin":
-            return "You no get permission to do this. Only Verticum Admin fit do am. <a href='/dashboard'>Back</a>", 403
+        if session.get("user_type")!="admin": return "You do not have permission to do this. Only Verticum Admin can do it. <a href='/dashboard'>Back</a>", 403
         return f(*args, **kwargs)
     return decorated
-
 def can_access_client(client_id):
-    # Admin can access all, client can only access own
     if is_admin(): return True
     if is_client() and current_client_id()==client_id: return True
     return False
 
-# ============ BOT LOGIC ============
 def handle_onboarding(client, customer_phone, msg):
     state = ONBOARDING.get(customer_phone, {"step": 0, "data": {}})
     lang = USER_LANG.get(customer_phone, "en")
     low = msg.lower().strip()
     pg = (lang == "pg")
-    HUMAN_HINT = "\n\nType HUMAN anytime to talk to a person." if not pg else "\n\nType HUMAN anytime to talk to person."
+    HUMAN_HINT = ""
     if state["step"] == 0:
         ONBOARDING[customer_phone] = {"step": 1, "data": {}}
         base = "Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?" if pg else "Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
@@ -188,13 +177,11 @@ def handle_onboarding(client, customer_phone, msg):
             state["step"]=5; state["data"]["agreed_price"]="₦50,000 setup + ₦10,000/month"; state["data"]["pictures"]=[]; state["data"]["products"]=[]; state["data"]["pending_image"]=None; ONBOARDING[customer_phone]=state
             base = "Great! Now send pictures of your products — one by one. After each picture, I go ask you for its name and price. When you don finish, type DONE. If you offer SERVICES and you no get pictures, type SKIP." if pg else "Great! Now send pictures of your products — one by one. After each picture, I will ask you for its name and price. When you are done, type DONE. If you offer SERVICES and have no pictures, type SKIP."
             return base + HUMAN_HINT
-        return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to person." if pg else "Reply YES to proceed with ₦50,000 setup + ₦10,000/month, or type HUMAN to talk to a person."
+        return "Reply YES to proceed with ₦50,000 setup + ₦10,000/month." if pg else "Reply YES to proceed with ₦50,000 setup + ₦10,000/month."
     if state["step"] == 5:
         if low in ["skip", "no pictures", "no picture", "i have no pictures", "services", "service", "no pics"]:
-            state["step"] = 5.5
-            ONBOARDING[customer_phone] = state
-            if pg:
-                return "No wahala! Type your services one by one like this:\n\nAdult Hair Cut 3k\n\nSend one by one. When you don finish, type DONE." + HUMAN_HINT
+            state["step"] = 5.5; ONBOARDING[customer_phone] = state
+            if pg: return "No wahala! Type your services one by one like this:\n\nAdult Hair Cut 3k\n\nSend one by one. When you don finish, type DONE." + HUMAN_HINT
             return "No problem! Type your services one by one like this:\n\nAdult Hair Cut 3k\n\nSend one by one. When you are done, type DONE." + HUMAN_HINT
         if state["data"].get("pending_image"):
             if low=="done": return "You never give me price for last picture. Wetin be name and price for am? e.g. Frontal 65k" if pg else "You haven't given me the price for the last picture yet. What is the name and price for it? e.g. Frontal 65k"
@@ -215,15 +202,13 @@ def handle_onboarding(client, customer_phone, msg):
             return "Services done! Now, what do customers always ask you? Type question + answer like this:\n\nQ: Do you deliver to Lagos?\nA: Yes, we deliver to Lagos for ₦3,000\n\nSend one by one. When you are done, type DONE." + HUMAN_HINT
         name, price = parse_price_text(msg)
         prod = {"name": name, "price": price, "image": ""}
-        state["data"]["products"].append(prod)
-        ONBOARDING[customer_phone]=state
+        state["data"]["products"].append(prod); ONBOARDING[customer_phone]=state
         count=len(state["data"]["products"])
         return f"Saved service! {name} - {price}. Send next service, or type DONE if you don finish." if pg else f"Saved service! {name} - {price}. Send next service, or type DONE if you are done."
     if state["step"] == 6:
         if low=="done":
             state["step"]=6.5; ONBOARDING[customer_phone]=state
-            if pg:
-                return "FAQs don finish! Last question:\n\nWetin be your PERSONAL WhatsApp number wey we go alert when your customer type HUMAN?\n\nNo be your business number o, na your private number wey customers no go see. E.g. 08039113437"
+            if pg: return "FAQs don finish! Last question:\n\nWetin be your PERSONAL WhatsApp number wey we go alert when your customer type HUMAN?\n\nNo be your business number o, na your private number wey customers no go see. E.g. 08039113437"
             return "FAQs done! Last question:\n\nWhat is your PERSONAL WhatsApp number we should alert when your customer types HUMAN?\n\nNot your business number, your private number that customers will not see. E.g. 08039113437"
         faq_text = msg
         state["data"]["faqs"].append({"q": faq_text, "a": faq_text})
@@ -237,7 +222,6 @@ def handle_onboarding(client, customer_phone, msg):
     if state["step"] == 6.5:
         personal = normalize_phone(msg)
         state["data"]["owner_phone"] = personal
-        # Auto-create login for new client: username = business lower, password = business lower + 123
         biz_clean = state["data"]["business"].lower().replace(" ","")
         state["data"]["login_username"] = biz_clean
         state["data"]["login_password"] = biz_clean + "123"
@@ -251,14 +235,18 @@ def handle_onboarding(client, customer_phone, msg):
             CHATS[new_id][customer_phone] = CHATS[client["id"]][customer_phone].copy()
             save_chats(CHATS)
         count=len(state["data"].get("products",[])); fcount=len(state["data"].get("faqs",[]))
-        if pg: return f"Perfect! We don save {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s) + your personal alert number {personal}.\n\nYour Dashboard Login:\nUsername: {biz_clean}\nPassword: {biz_clean}123\n\nOur team go contact you to connect your BUSINESS number (the one customers go chat) and launch your bot. Thank you!"
-        return f"Perfect! We have saved {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s) + your personal alert number {personal}.\n\nYour Dashboard Login:\nUsername: {biz_clean}\nPassword: {biz_clean}123\n\nOur team will contact you to connect your BUSINESS number (the one customers will chat) and launch your bot. Thank you!"
+        if pg: return f"Perfect! We don save {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s) + your personal alert number {personal}.\n\nYour Dashboard Login:\nUsername: {biz_clean}\nPassword: {biz_clean}123\n\nOur team go contact you to connect your BUSINESS number (the one customers go chat) and launch your bot. If you still wan talk to person, type HUMAN now. Thank you!"
+        return f"Perfect! We have saved {state['data']['business']} + {count} product(s)/service(s) + {fcount} FAQ(s) + your personal alert number {personal}.\n\nYour Dashboard Login:\nUsername: {biz_clean}\nPassword: {biz_clean}123\n\nOur team will contact you to connect your BUSINESS number (the one customers will chat) and launch your bot. If you still want to talk to a person, type HUMAN now. Thank you!"
     return "Type HELLO to start again."
 
 def handle_client_bot(client, customer_phone, msg, phone_id):
     lang = USER_LANG.get(customer_phone, "en")
     low = msg.lower().strip()
     biz = client["business"]
+    if low in ["english", "change to english"]:
+        USER_LANG[customer_phone]="en"; return "Language changed to English. Type PRICE to see prices, PICTURES to see products."
+    if low in ["pidgin", "change to pidgin"]:
+        USER_LANG[customer_phone]="pg"; return "Language don change to Pidgin. Type PRICE for price, PICTURES to see products."
     for faq in client.get("faqs", []):
         q = faq.get("q","").lower()
         keywords = [w for w in re.findall(r'\w+', q) if len(w)>3]
@@ -269,33 +257,32 @@ def handle_client_bot(client, customer_phone, msg, phone_id):
             if matches >= 1:
                 return faq.get("a", "")
     if low in ["price","prices","how much"]:
+        SEEN_PRODUCTS.add((client["id"], customer_phone))
         lines=[]
         for p in client.get("products",[]):
             lines.append(f"{p['name']} - {p['price']}")
-        if not lines: return "Our prices go soon dey here. Type HUMAN to talk to person." if lang=="pg" else "Our prices will be here soon. Type HUMAN to talk to a person."
-        if lang=="pg": return "Our prices be:\n"+"\n".join(lines)+"\nType PICTURES to see dem."
-        return "Our prices are:\n"+"\n".join(lines)+"\nType PICTURES to see them."
+        if not lines: return "Our prices go soon dey here." if lang=="pg" else "Our prices will be here soon."
+        if lang=="pg": return "Our prices be:\n"+"\n".join(lines)+"\nType PICTURES to see dem.\n\nIf you wan talk to person, type HUMAN."
+        return "Our prices are:\n"+"\n".join(lines)+"\nType PICTURES to see them.\n\nIf you want to talk to a person, type HUMAN."
     if low in ["pictures","picture","send pictures","show me pictures","images","services","service list","menu"]:
+        SEEN_PRODUCTS.add((client["id"], customer_phone))
         has_images = False
         for p in client.get("products",[]):
             if p.get("image"):
                 has_images = True
                 send_image(phone_id, customer_phone, p["image"], f"{p['name']} - {p['price']}")
         if has_images:
-            return "I don send the pictures above. Which one you want?" if lang=="pg" else "I have sent the pictures above. Which one would you like?"
+            return "I don send the pictures above. Which one you want?\n\nIf you wan talk to person, type HUMAN." if lang=="pg" else "I have sent the pictures above. Which one would you like?\n\nIf you want to talk to a person, type HUMAN."
         lines=[]
         for p in client.get("products",[]):
             lines.append(f"{p['name']} - {p['price']}")
         if lines:
-            if lang=="pg": return "We offer services, we no get pictures yet:\n"+"\n".join(lines)+"\nWhich one you want? Type HUMAN to book."
-            return "We offer these services (no pictures yet):\n"+"\n".join(lines)+"\nWhich one would you like? Type HUMAN to book."
-        return "We no get pictures yet. Type PRICE for our services or HUMAN to talk to person." if lang=="pg" else "We don't have pictures yet. Type PRICE for our services or HUMAN to talk to a person."
-    if low in ["human","person","agent","talk to person","talk to human"]:
-        TAKEOVER.add((client["id"], customer_phone))
-        return "Person go reply you soon. Abeg wait small." if lang=="pg" else "A human will reply you shortly. Please wait."
+            if lang=="pg": return "We offer services, we no get pictures yet:\n"+"\n".join(lines)+"\nWhich one you want?\n\nIf you wan talk to person, type HUMAN."
+            return "We offer these services (no pictures yet):\n"+"\n".join(lines)+"\nWhich one would you like?\n\nIf you want to talk to a person, type HUMAN."
+        return "We no get pictures yet. Type PRICE for our services." if lang=="pg" else "We don't have pictures yet. Type PRICE for our services."
     if low in ["hello","hi","hey"]:
-        return client.get("greeting_pg", f"Hello, welcome to {biz}!") if lang=="pg" else client.get("greeting_en", f"Hello, welcome to {biz}!")
-    return "I no understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to person." if lang=="pg" else "I didn't understand. Type PRICE for prices, PICTURES to see products, HUMAN to talk to a person."
+        return client.get("greeting_pg", f"Hello, welcome to {biz}! Type PRICE for price, PICTURES to see products.") if lang=="pg" else client.get("greeting_en", f"Hello, welcome to {biz}! Type PRICE to see prices, PICTURES to see products.")
+    return "I no understand. Type PRICE for prices, PICTURES to see products." if lang=="pg" else "I didn't understand. Type PRICE for prices, PICTURES to see products."
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -341,9 +328,44 @@ def webhook():
         add_chat(client["id"], customer_phone, {"from":"customer","text":msg_text})
         low_text = msg_text.lower().strip()
         if low_text in ["human","person","agent","talk to person","talk to human","i want human","speak to human"]:
-            lang = USER_LANG.get(customer_phone, "en")
+            cust_lang = USER_LANG.get(customer_phone, "en")
+            if client.get("mode")=="onboarding":
+                if ONBOARDING.get(customer_phone, {}).get("step", 0) >= 7:
+                    TAKEOVER.add((client["id"], customer_phone))
+                    reply = "Person go reply you soon. Abeg wait small." if cust_lang=="pg" else "A human will reply you shortly. Please wait."
+                    send_text(phone_id, customer_phone, reply)
+                    add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
+                    send_owner_alert(phone_id, client, customer_phone, msg_text)
+                    return "ok",200
+                count = HUMAN_ATTEMPT_ONBOARDING.get(customer_phone, 0) + 1
+                HUMAN_ATTEMPT_ONBOARDING[customer_phone] = count
+                if count == 1:
+                    if cust_lang=="pg": reply = "I fit help you finish this sharp sharp, na 2 minutes remain. Make we continue — wetin be the next thing? Type DONE if you don finish this step."
+                    else: reply = "I can help you finish this quickly, only 2 minutes left. Let's continue — what is the next thing? Type DONE if you have finished this step."
+                    send_text(phone_id, customer_phone, reply)
+                    add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
+                    return "ok",200
+                TAKEOVER.add((client["id"], customer_phone))
+                reply = "Person go reply you soon. Abeg wait small." if cust_lang=="pg" else "A human will reply you shortly. Please wait."
+                send_text(phone_id, customer_phone, reply)
+                add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
+                send_owner_alert(phone_id, client, customer_phone, msg_text)
+                return "ok",200
+            if (client["id"], customer_phone) not in SEEN_PRODUCTS:
+                lines=[]
+                for p in client.get("products",[]):
+                    lines.append(f"{p['name']} - {p['price']}")
+                SEEN_PRODUCTS.add((client["id"], customer_phone))
+                if lines:
+                    if cust_lang=="pg": reply = "Make you first see wetin we get:\n"+"\n".join(lines)+"\n\nIf you still wan talk to person after you see am, type HUMAN again."
+                    else: reply = "Let me first show you what we have:\n"+"\n".join(lines)+"\n\nIf you still want to talk to a person after seeing this, type HUMAN again."
+                else:
+                    reply = "Make you first tell me wetin you want. Type PRICE or PICTURES." if cust_lang=="pg" else "Let me first show you what we have. Type PRICE or PICTURES."
+                send_text(phone_id, customer_phone, reply)
+                add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
+                return "ok",200
             TAKEOVER.add((client["id"], customer_phone))
-            reply = "Person go reply you soon. Abeg wait small. Type anything, person go see am." if lang=="pg" else "A human will reply you shortly. Please wait. A person has been alerted."
+            reply = "Person go reply you soon. Abeg wait small." if cust_lang=="pg" else "A human will reply you shortly. Please wait. A person has been alerted."
             send_text(phone_id, customer_phone, reply)
             add_chat(client["id"], customer_phone, {"from":"bot","text":reply})
             send_owner_alert(phone_id, client, customer_phone, msg_text)
@@ -357,11 +379,11 @@ def webhook():
         if customer_phone not in USER_LANG:
             if msg_text.strip()=="1":
                 USER_LANG[customer_phone]="en"
-                if client.get("mode")=="onboarding": ONBOARDING[customer_phone]={"step":1,"data":{}}; reply="Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?\n\nType HUMAN anytime to talk to a person."
+                if client.get("mode")=="onboarding": ONBOARDING[customer_phone]={"step":1,"data":{}}; reply="Welcome to Verticum! We set up Auto WhatsApp reply for businesses. What is your business name?"
                 else: reply=TEXTS["greeting_en"].format(biz=client["business"])
             elif msg_text.strip()=="2":
                 USER_LANG[customer_phone]="pg"
-                if client.get("mode")=="onboarding": ONBOARDING[customer_phone]={"step":1,"data":{}}; reply="Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?\n\nType HUMAN anytime to talk to person."
+                if client.get("mode")=="onboarding": ONBOARDING[customer_phone]={"step":1,"data":{}}; reply="Welcome to Verticum! We dey set up Auto WhatsApp for businesses. Wetin be your business name?"
                 else: reply=TEXTS["greeting_pg"].format(biz=client["business"])
             else: reply=TEXTS["choose_lang"].format(biz=client["business"])
             send_text(phone_id,customer_phone,reply); add_chat(client["id"], customer_phone, {"from":"bot","text":reply}); return "ok",200
@@ -371,7 +393,6 @@ def webhook():
     except Exception as e: print("ERROR:",e)
     return "ok",200
 
-# ============ DASHBOARD WITH LOGIN ============
 LOGIN_HTML = """
 <h2>Verticum Dashboard - Login</h2>
 {% if error %}<p style='color:red'>{{error}}</p>{% endif %}
@@ -382,33 +403,21 @@ LOGIN_HTML = """
 </form>
 <p>Admin: use Verticum login. Client: use username/password wey Verticum give you.</p>
 """
-
 @app.route("/dashboard/login", methods=["GET","POST"])
 def dashboard_login():
     if request.method=="POST":
         u = request.form.get("username","").strip()
         p = request.form.get("password","").strip()
-        # Admin check
         if u==ADMIN_USER and p==ADMIN_PASS:
-            session["user_type"]="admin"
-            session["username"]=u
-            session.pop("client_id", None)
-            return redirect("/dashboard")
-        # Client check
+            session["user_type"]="admin"; session["username"]=u; session.pop("client_id", None); return redirect("/dashboard")
         for c in load_clients():
             if c.get("login_username")==u and c.get("login_password")==p:
-                session["user_type"]="client"
-                session["username"]=u
-                session["client_id"]=c.get("id")
-                session["business"]=c.get("business")
-                return redirect("/dashboard")
+                session["user_type"]="client"; session["username"]=u; session["client_id"]=c.get("id"); session["business"]=c.get("business"); return redirect("/dashboard")
         return render_template_string(LOGIN_HTML, error="Wrong username or password. Check am again.")
     return render_template_string(LOGIN_HTML, error=None)
-
 @app.route("/dashboard/logout")
 def dashboard_logout():
-    session.clear()
-    return redirect("/dashboard/login")
+    session.clear(); return redirect("/dashboard/login")
 
 DASHBOARD_ADMIN_HTML = """
 <h2>Verticum Dashboard - ADMIN ({{session.username}})</h2>
@@ -418,8 +427,8 @@ DASHBOARD_ADMIN_HTML = """
 {% for c in clients %}
   <div style='border:1px solid #ccc;padding:12px;margin:10px'>
     <b>{{c.business}}</b> - Mode: {{c.mode}} - Active: {{c.active}} - Status: {{c.get('status','pending')}}<br>
-    <b>Business Phone ID (Meta):</b> {{c.phone_id or '(Not set yet)'}}<br>
-    <b>Personal Alert Number:</b> {{c.get('owner_phone','(Not set)')}}<br>
+    <b>Business Phone ID (Meta - customers chat this):</b> {{c.phone_id or '(Not set yet)'}}<br>
+    <b>Personal Alert Number (private):</b> {{c.get('owner_phone','(Not set)')}}<br>
     <b>Dashboard Login:</b> Username: <b>{{c.get('login_username','(not set)')}}</b> / Password: <b>{{c.get('login_password','(not set)')}}</b><br>
     <form method='POST' action='/dashboard/update-client/{{c.id}}' style='margin:6px 0'>
       Business Phone ID: <input name='phone_id' value='{{c.phone_id}}' style='width:200px'>
@@ -436,7 +445,6 @@ DASHBOARD_ADMIN_HTML = """
   </div>
 {% endfor %}
 """
-
 DASHBOARD_CLIENT_HTML = """
 <h2>{{client.business}} Dashboard - Welcome {{session.username}}</h2>
 <p><a href='/dashboard/logout'>Logout</a></p>
@@ -447,19 +455,15 @@ Status: {{client.get('status','pending')}} - Active: {{client.active}}</p>
 <p><a href='/dashboard/client/{{client.id}}'>View My Chats + Reply to Customers</a></p>
 <p><b>Note:</b> You only see your own business. You no fit see other Verticum clients.</p>
 """
-
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    if is_admin():
-        return render_template_string(DASHBOARD_ADMIN_HTML, clients=load_clients())
+    if is_admin(): return render_template_string(DASHBOARD_ADMIN_HTML, clients=load_clients())
     else:
         clients = load_clients()
         for c in clients:
-            if c.get("id")==current_client_id():
-                return render_template_string(DASHBOARD_CLIENT_HTML, client=c)
+            if c.get("id")==current_client_id(): return render_template_string(DASHBOARD_CLIENT_HTML, client=c)
         return "Client not found. <a href='/dashboard/logout'>Logout</a>"
-
 @app.route("/dashboard/all-chats")
 @login_required
 @admin_required
@@ -475,15 +479,11 @@ def all_chats():
                 else: html += f"<p><b>{m.get('from')}:</b> {m.get('text')}</p>"
     if not chats: html += "<p>No chats saved yet.</p>"
     return html
-
 @app.route("/dashboard/client/<client_id>")
 @login_required
 def client_chats(client_id):
-    if not can_access_client(client_id):
-        return "You no fit see this client chats. You only fit see your own. <a href='/dashboard'>Back to Your Dashboard</a>", 403
-    chats = load_chats()
-    clients = load_clients()
-    biz_name = client_id
+    if not can_access_client(client_id): return "You no fit see this client chats. You only fit see your own. <a href='/dashboard'>Back to Your Dashboard</a>", 403
+    chats = load_chats(); clients = load_clients(); biz_name = client_id
     for c in clients:
         if c.get("id")==client_id: biz_name = c.get("business", client_id)
     html=f"<h2>{biz_name} Chats - Reply from here</h2><a href='/dashboard'>Back</a><br><br>"
@@ -503,19 +503,15 @@ def client_chats(client_id):
             </form>
             </div>
             """
-    else:
-        html+=f"<p>No chats yet for {biz_name}.</p>"
+    else: html+=f"<p>No chats yet for {biz_name}.</p>"
     return html
-
 @app.route("/dashboard/reply/<client_id>/<phone>", methods=["POST"])
 @login_required
 def dashboard_reply(client_id, phone):
-    if not can_access_client(client_id):
-        return "You no fit reply this client. <a href='/dashboard'>Back</a>", 403
+    if not can_access_client(client_id): return "You no fit reply this client. <a href='/dashboard'>Back</a>", 403
     msg = request.form.get("message","").strip()
     if not msg: return redirect(f"/dashboard/client/{client_id}")
-    clients = load_clients()
-    phone_id = None
+    clients = load_clients(); phone_id = None
     for c in clients:
         if c.get("id")==client_id: phone_id = c.get("phone_id")
     if not phone_id:
@@ -524,10 +520,8 @@ def dashboard_reply(client_id, phone):
     if phone_id:
         send_text(phone_id, phone, msg)
         add_chat(client_id, phone, {"from":"you (owner)","text":msg})
-    else:
-        return f"No Phone ID found for {client_id}. Set Phone ID first in dashboard. <a href='/dashboard'>Back</a>"
+    else: return f"No Phone ID found for {client_id}. Set Phone ID first in dashboard. <a href='/dashboard'>Back</a>"
     return redirect(f"/dashboard/client/{client_id}")
-
 @app.route("/dashboard/update-client/<client_id>", methods=["POST"])
 @login_required
 @admin_required
@@ -540,13 +534,10 @@ def update_client(client_id):
             c["login_username"]=request.form.get("login_username","").strip()
             c["login_password"]=request.form.get("login_password","").strip()
     save_clients(clients); return redirect("/dashboard")
-
 @app.route("/dashboard/update-phone/<client_id>", methods=["POST"])
 @login_required
 @admin_required
-def update_phone(client_id):
-    return update_client(client_id)
-
+def update_phone(client_id): return update_client(client_id)
 @app.route("/dashboard/takeover/<client_id>/<phone>")
 @login_required
 def takeover(client_id,phone):
@@ -584,6 +575,23 @@ def deactivate_client(client_id):
 @admin_required
 def add_client():
     if request.method=="POST":
-        clients=load_clients()
-        biz = request.form["business"]
-        biz_clean = biz.lower().replace(" ","")
+        clients=load_clients(); biz = request.form["business"]; biz_clean = biz.lower().replace(" ","")
+        new={"id": biz.lower().replace(" ","").replace(".",""), "business": biz, "phone_id": request.form["phone_id"], "owner_phone": normalize_phone(request.form.get("owner_phone","")), "login_username": request.form.get("login_username") or biz_clean, "login_password": request.form.get("login_password") or (biz_clean+"123"), "mode":"client", "active":True, "status":"active", "products":[{"name": request.form["product_name"], "price": request.form["price"], "image": request.form["image"]}], "faqs":[]}
+        clients.append(new); save_clients(clients); return redirect("/dashboard")
+    return """
+    <h2>Add New Client - Fast Way (Admin Only)</h2>
+    <form method='POST'>
+      Business Name: <input name='business'><br>
+      Business Phone ID (from Meta): <input name='phone_id'><br>
+      Personal Alert Number: <input name='owner_phone' placeholder='e.g. 08039113437'><br>
+      Dashboard Username: <input name='login_username' placeholder='e.g. sandra'><br>
+      Dashboard Password: <input name='login_password' placeholder='e.g. sandra123'><br>
+      Product / Service Name: <input name='product_name'><br>
+      Price: <input name='price'><br>
+      Cloudinary Image Link: <input name='image' placeholder='https://res.cloudinary.com/...'><br>
+      <button>Add Client</button>
+    </form>
+    """
+@app.route("/")
+def home(): return "Verticum Bot is Live"
+if __name__=="__main__": app.run(port=5000)
