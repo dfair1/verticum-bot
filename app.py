@@ -12,18 +12,170 @@ CLOUDINARY_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "")
 OWNER_PHONE = os.environ.get("OWNER_PHONE", "2348039113437")
 ADMIN_USER = os.environ.get("ADMIN_USER", "verticum")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "verticum123")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# ============ POSTGRES STORAGE (FIX FOR DISAPPEARING CLIENTS) ============
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PG = True if DATABASE_URL else False
+except Exception as e:
+    print("PSYCOPG2 NOT INSTALLED:", e)
+    HAS_PG = False
+
+def get_db():
+    # Render gives postgres:// but psycopg2 needs postgresql://
+    url = DATABASE_URL
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url, sslmode="require")
+
+def init_db():
+    if not HAS_PG:
+        return
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id TEXT PRIMARY KEY,
+                data JSONB NOT NULL
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chats (
+                client_id TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                messages JSONB NOT NULL,
+                PRIMARY KEY (client_id, phone)
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("POSTGRES TABLES READY")
+    except Exception as e:
+        print("INIT DB ERROR:", e)
+
+init_db()
 
 def load_clients():
+    # Postgres version
+    if HAS_PG:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT data FROM clients ORDER BY data->>'business' ASC")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            clients = [r[0] for r in rows]
+            # Auto-import from old json file once, if DB is empty
+            if not clients:
+                try:
+                    with open("clients.json") as f:
+                        old = json.load(f)
+                    if old:
+                        save_clients(old)
+                        print(f"IMPORTED {len(old)} clients from clients.json to Postgres")
+                        return old
+                except:
+                    pass
+            return clients
+        except Exception as e:
+            print("LOAD CLIENTS PG ERROR:", e)
+            return []
+    # Fallback for local testing without DATABASE_URL
     try:
         with open("clients.json") as f: return json.load(f)
     except: return []
+
 def save_clients(clients):
+    if HAS_PG:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            # Get existing ids to delete removed clients
+            cur.execute("SELECT id FROM clients")
+            existing = set([r[0] for r in cur.fetchall()])
+            new_ids = set()
+            for c in clients:
+                cid = str(c.get("id", ""))
+                if not cid:
+                    continue
+                new_ids.add(cid)
+                cur.execute(
+                    "INSERT INTO clients (id, data) VALUES (%s, %s) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data",
+                    (cid, json.dumps(c))
+                )
+            # Delete clients that were removed
+            for old_id in (existing - new_ids):
+                cur.execute("DELETE FROM clients WHERE id = %s", (old_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return
+        except Exception as e:
+            print("SAVE CLIENTS PG ERROR:", e)
+            return
     with open("clients.json", "w") as f: json.dump(clients, f, indent=2)
+
 def load_chats():
+    if HAS_PG:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT client_id, phone, messages FROM chats")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            chats = {}
+            for client_id, phone, msgs in rows:
+                if client_id not in chats:
+                    chats[client_id] = {}
+                chats[client_id][phone] = msgs if isinstance(msgs, list) else []
+            # Auto-import old chats.json once if DB empty
+            if not chats:
+                try:
+                    with open("chats.json") as f:
+                        old = json.load(f)
+                    if old:
+                        save_chats(old)
+                        return old
+                except:
+                    pass
+            return chats
+        except Exception as e:
+            print("LOAD CHATS PG ERROR:", e)
+            return {}
     try:
         with open("chats.json") as f: return json.load(f)
     except: return {}
+
 def save_chats(chats):
+    if HAS_PG:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT client_id, phone FROM chats")
+            existing = set([(r[0], r[1]) for r in cur.fetchall()])
+            new_keys = set()
+            for client_id, phones in chats.items():
+                for phone, msgs in phones.items():
+                    new_keys.add((str(client_id), str(phone)))
+                    cur.execute(
+                        "INSERT INTO chats (client_id, phone, messages) VALUES (%s, %s, %s) ON CONFLICT (client_id, phone) DO UPDATE SET messages = EXCLUDED.messages",
+                        (str(client_id), str(phone), json.dumps(msgs))
+                    )
+            for old_key in (existing - new_keys):
+                cur.execute("DELETE FROM chats WHERE client_id = %s AND phone = %s", (old_key[0], old_key[1]))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return
+        except Exception as e:
+            print("SAVE CHATS PG ERROR:", e)
+            return
     with open("chats.json", "w") as f: json.dump(chats, f, indent=2)
 
 CHATS = load_chats()
